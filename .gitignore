@@ -1,0 +1,45 @@
+# Secrets and env (never commit)
+.env
+.env.local
+.env.*.local
+infra/.env
+!.env.example
+!infra/.env.example
+*.pem
+*.key
+secrets/
+*.secret
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Build and dist
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Test and lint
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Logs and local data
+*.log
+logs/
+data/local/

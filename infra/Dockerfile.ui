@@ -1,0 +1,8 @@
+# Minimal internal admin UI (SSH tunnel only)
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install --no-cache-dir "uvicorn[standard]" "starlette>=0.36"
+COPY src/ui/ ./ui/
+WORKDIR /app/ui
+EXPOSE 8080
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
