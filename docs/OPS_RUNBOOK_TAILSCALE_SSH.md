@@ -58,11 +58,10 @@ The script checks that context `um790` exists, brings up the stack, waits for th
 
 Before cutting a release or merging to main, run the release gate and satisfy [RELEASE_ACCEPTANCE_CHECKLIST.md](RELEASE_ACCEPTANCE_CHECKLIST.md):
 
-- **Exact command**: From repo root, with Postgres and Redis up:  
-  `export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0`  
-  then `make release-gate`. Optional: `make release-gate-um790` to include UM790 smoke.
-- **Required env**: `DATABASE_URL`, `REDIS_URL`; for smoke also `POSTGRES_PASSWORD`, `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`.
-- **Report files**: Written to `artifacts/release_gate/report_*.json` and `*.md`; inspect for `release_gate_pass: true`.
+- **Docker-native (recommended)**: From repo root, run `make release-gate-docker`. No host venv; starts Postgres/Redis if needed, runs the gate in the `validate` container, writes report to `artifacts/release_gate/`.
+- **On UM790**: After deploy, run smoke with `make smoke-um790` (or `./scripts/smoke_um790.sh`). To run the full gate on the UM790 and store the report there, use the same docker context: bring up postgres/redis, then run the validate container with the repo mounted (e.g. from the machine that has the repo and docker context `um790`, run `make release-gate-docker` with context set to um790 for compose — or run the gate locally and then deploy).
+- **Required env**: For Docker gate: `POSTGRES_PASSWORD` (default `stockbot`). For smoke: `POSTGRES_PASSWORD`, `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`.
+- **Report files**: `artifacts/release_gate/report_*.json` and `*.md`; pass = `release_gate_pass: true` and exit 0.
 - **What blocks release**: Migrations fail, DB-backed tests fail, replay session_001 does not match golden outputs, or smoke fails when run.
 
 ## Restart / rollback

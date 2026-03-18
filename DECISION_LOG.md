@@ -96,3 +96,21 @@ Decision:
 Consequences:
 - Next work is fixture capture, replay runner, golden outputs, and a release acceptance checklist.
 - Strategy expansion is deferred until replay stability is proven.
+
+## 2026-03-18 — Next milestone is Docker-native release validation
+Status: Accepted
+
+Context:
+- The release gate, replay pack, and smoke path are implemented.
+- Remaining friction is environment inconsistency and residual runtime-path test failures.
+- The target deployment model is Docker on the UM790 over Tailscale SSH.
+
+Decision:
+- Make the release gate fully Docker-native.
+- Standardize validation on async Postgres + Redis only.
+- Remove SQLite assumptions from runtime-adjacent tests.
+- Clean the lint/type/test surface for files in the release path.
+
+Consequences:
+- Next work is validation containerization, test-environment unification, and core-path cleanup.
+- New feature work remains frozen until the release gate runs in one command without host Python setup.

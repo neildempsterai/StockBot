@@ -52,14 +52,20 @@ make replay
 # To refresh golden outputs after an intentional change: run with --output actual.json, review diff, then copy to expected_outputs.json and document in DECISION_LOG.md.
 # Compare two outputs: python scripts/replay_diff.py actual.json expected_outputs.json
 
-# Release gate (one command: migrations, DB tests, replay, report)
-# Requires: Python venv with pip install -e ".[dev]", and Postgres + Redis (e.g. docker compose up -d postgres redis).
+# Release gate — Docker-native (preferred; no host venv)
+make release-gate-docker
+# Starts postgres + redis if needed, runs migrations + DB tests + replay inside validate container, writes report to artifacts/release_gate/. Requires: Docker, POSTGRES_PASSWORD (default stockbot), optional ALPACA keys (dummy OK).
+
+# Release gate — local (requires venv + Postgres + Redis)
 docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis
 export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0
 make release-gate
-# Reports written to artifacts/release_gate/ (report_YYYYMMDD_HHMMSS.json and .md). Use ./scripts/release_gate.sh --start-infra to start postgres/redis via compose before running the gate.
+# Reports: artifacts/release_gate/report_YYYYMMDD_HHMMSS.json and .md. Pass = exit 0; fail = first failing step.
 
-# UM790 staging smoke (after deploy; requires context um790 and env vars)
+# UM790: run gate then smoke (after deploy)
+make release-gate-um790   # local gate + smoke_um790
+# Or on UM790 host: use docker context um790 and run smoke_um790 after deploy.
+
 make smoke-um790
 # Or: ./scripts/smoke_um790.sh
 ```

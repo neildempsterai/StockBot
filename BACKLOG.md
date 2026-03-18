@@ -40,3 +40,8 @@
 - [ ] Add golden-output assertions for signals, rejections, shadow trades, and metrics
 - [ ] Add regression-diff report for replay changes between commits
 - [ ] Add release acceptance checklist based on replay + smoke
+- [ ] Containerize release gate so it runs without host venv/tooling
+- [ ] Standardize runtime-path tests on async Postgres + Redis
+- [ ] Remove SQLite fallback assumptions from API/worker validation tests
+- [ ] Clean lint/type issues in release-path files
+- [ ] Run first full Docker-native release gate on UM790 and store report artifact

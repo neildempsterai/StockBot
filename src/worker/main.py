@@ -114,7 +114,7 @@ def _parse_bar_from_payload(payload: dict) -> BarLike | None:
     else:
         ts = datetime.now(UTC)
     return BarLike(
-        symbol=bar.get("symbol", ""),
+        symbol=bar.get("symbol", bar.get("S", "")),
         open=Decimal(str(bar.get("o", bar.get("open", 0)))),
         high=Decimal(str(bar.get("h", bar.get("high", 0)))),
         low=Decimal(str(bar.get("l", bar.get("low", 0)))),

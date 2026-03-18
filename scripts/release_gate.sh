@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Release gate: verify env, optional start infra, migrations, DB tests, replay, optional UM790 smoke.
-# Exit non-zero on first failure. Writes report to artifacts/release_gate/ when REPORT=1 or --report.
+# Release gate: migrations, DB tests, replay, optional UM790 smoke.
+# Modes: local (default), --docker (run gate in validate container), --docker-inner (inside container).
+# Exit non-zero on first failure. Writes report to artifacts/release_gate/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,20 +10,47 @@ COMPOSE_MAIN="-f infra/compose.yaml"
 COMPOSE_TEST="-f infra/compose.yaml -f infra/compose.test.yaml"
 RUN_UM790=false
 START_INFRA=false
+USE_DOCKER=false
+DOCKER_INNER=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --docker) USE_DOCKER=true; shift ;;
+    --docker-inner) DOCKER_INNER=true; shift ;;
     --um790) RUN_UM790=true; shift ;;
     --start-infra) START_INFRA=true; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
+# ---- Docker mode (host): run gate inside validate container ----
+if [[ "$USE_DOCKER" == true ]] && [[ "$DOCKER_INNER" != true ]]; then
+  export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-stockbot}"
+  export ALPACA_API_KEY_ID="${ALPACA_API_KEY_ID:-dummy}"
+  export ALPACA_API_SECRET_KEY="${ALPACA_API_SECRET_KEY:-dummy}"
+  if [[ "$START_INFRA" == true ]]; then
+    echo "[release_gate] Starting postgres + redis..."
+    docker compose $COMPOSE_TEST up -d postgres redis
+    echo "[release_gate] Waiting for postgres..."
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      if docker compose $COMPOSE_TEST exec -T postgres pg_isready -U stockbot 2>/dev/null; then
+        break
+      fi
+      [[ $i -eq 10 ]] && { echo "Postgres did not become ready" >&2; exit 1; }
+      sleep 2
+    done
+    sleep 2
+  fi
+  echo "[release_gate] Running gate in validate container..."
+  docker compose $COMPOSE_TEST run --rm -v "$ROOT:/app" -w /app validate bash -c "scripts/release_gate.sh --docker-inner"
+  exit $?
+fi
+
 export PYTHONPATH="${ROOT}:${ROOT}/src"
 export ALPACA_API_KEY_ID="${ALPACA_API_KEY_ID:-dummy}"
 export ALPACA_API_SECRET_KEY="${ALPACA_API_SECRET_KEY:-dummy}"
 
-# ---- Required env (for DB tests and replay) ----
+# ---- Required env (for DB tests and replay); when --docker-inner, compose sets DATABASE_URL/REDIS_URL ----
 if [[ -z "${DATABASE_URL:-}" ]]; then
   if [[ -n "${POSTGRES_PASSWORD:-}" ]]; then
     export DATABASE_URL="postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD}@localhost:5432/stockbot"
@@ -35,7 +63,7 @@ if [[ -z "${REDIS_URL:-}" ]]; then
   export REDIS_URL="redis://localhost:6379/0"
 fi
 
-# ---- Optional: start test infra ----
+# ---- Optional: start test infra (local mode only) ----
 if [[ "$START_INFRA" == true ]]; then
   echo "[release_gate] Starting postgres + redis..."
   export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-stockbot}"
@@ -131,8 +159,8 @@ else
 fi
 rm -f "$REPLAY_OUT"
 
-# ---- 4. Optional UM790 smoke ----
-if [[ "$RUN_UM790" == true ]]; then
+# ---- 4. Optional UM790 smoke (host only; skipped when --docker-inner) ----
+if [[ "$RUN_UM790" == true ]] && [[ "$DOCKER_INNER" != true ]]; then
   echo "[release_gate] Smoke UM790..."
   if ./scripts/smoke_um790.sh 2>/dev/null; then
     SMOKE_STATUS="ok"

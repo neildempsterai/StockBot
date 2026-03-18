@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -161,9 +161,9 @@ async def test_worker_consumes_bar_emits_signal_and_opens_shadow() -> None:
 
     sym_state = SymbolState(symbol="AAPL")
     sym_state.prev_close = Decimal("145")
-    sym_state.latest_bid = Decimal("150")
-    sym_state.latest_ask = Decimal("150.05")
-    sym_state.latest_last = Decimal("150")
+    sym_state.latest_bid = Decimal("152")
+    sym_state.latest_ask = Decimal("152.05")
+    sym_state.latest_last = Decimal("152")
     for i in range(5):
         sym_state.bars.append(BarLike(
             symbol="AAPL",
@@ -174,20 +174,22 @@ async def test_worker_consumes_bar_emits_signal_and_opens_shadow() -> None:
             volume=100000,
             timestamp=datetime(2026, 3, 17, 13, 35 + i, 0, tzinfo=UTC),
         ))
+    # 6th bar: break above opening range high (151) to trigger long
     sym_state.bars.append(BarLike(
         symbol="AAPL",
-        open=Decimal("148"),
-        high=Decimal("149"),
-        low=Decimal("147.5"),
-        close=Decimal("149"),
+        open=Decimal("151"),
+        high=Decimal("152"),
+        low=Decimal("150.5"),
+        close=Decimal("152"),
         volume=2000000,
         timestamp=datetime(2026, 3, 17, 14, 35, 0, tzinfo=UTC),
     ))
     from stockbot.strategies.intra_event_momo import NewsItem
+    # Published within last 60 min so classify_news_side returns "long"
     sym_state.news.append(NewsItem(
         headline="AAPL beats earnings",
         summary="raised guidance",
-        published_at=datetime(2026, 3, 17, 14, 0, 0, tzinfo=UTC),
+        published_at=datetime.now(UTC) - timedelta(minutes=30),
         symbol="AAPL",
         raw={},
     ))

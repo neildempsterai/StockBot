@@ -23,7 +23,7 @@ REDIS_STREAM_NEWS = "alpaca:market:news"
 
 async def fan_out_handler(redis_client: redis.Redis, msg_type: str, payload: dict) -> None:
     """Push to Redis streams for downstream consumers."""
-    ts = datetime.now(timezone.UTC).isoformat()
+    ts = datetime.now(timezone.utc).isoformat()
     body = {"type": msg_type, "payload": _serialize_payload(payload), "ingest_ts": ts}
     if msg_type == "trade":
         await redis_client.xadd(REDIS_STREAM_TRADES, {"data": json.dumps(body)}, maxlen=10000)
@@ -66,7 +66,7 @@ async def reseed_from_snapshots(stream_client: StreamClient, symbols: list[str])
     """On cold start or reconnect: reseed from REST snapshots then resume stream."""
     client = AlpacaClient()
     snapshots = client.get_snapshots(symbols)
-    for sym, snap in snapshots.items():
+    for _sym, snap in snapshots.items():
         if snap and snap.latest_quote:
             await stream_client._dispatch("quote", {"quote": snap.latest_quote, "raw": {}})
         if snap and snap.latest_trade:

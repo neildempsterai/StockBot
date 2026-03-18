@@ -2,20 +2,33 @@
 
 A release candidate must satisfy all items below before merge/release. No exceptions without a Decision Log entry.
 
-## Single release gate command
+## Docker-native release gate (preferred)
 
-From repo root, with Postgres and Redis running (e.g. `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis`):
+From repo root; no host Python/venv required. Docker and Compose only.
 
 ```bash
-export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot
-export REDIS_URL=redis://localhost:6379/0
-# Optional: POSTGRES_PASSWORD if not using default
+make release-gate-docker
+```
+
+This will:
+1. Start Postgres and Redis (if not already up) via `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis`.
+2. Run the full gate inside the `validate` container: migrations, DB-backed tests, replay session_001 vs golden.
+3. Write report to `artifacts/release_gate/report_YYYYMMDD_HHMMSS.json` and `.md` on the host (repo is mounted into the container).
+
+**Required env**: `POSTGRES_PASSWORD` (default `stockbot`). Optional: `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` (dummy OK for replay).
+
+**Pass**: Exit 0. **Fail**: Exit non-zero at first failing step (migrations, tests, or replay).
+
+## Local release gate (with venv)
+
+If you have a Python venv with `pip install -e ".[dev]"` and Postgres + Redis running:
+
+```bash
+export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0
 make release-gate
 ```
 
-This runs, in order: migrations, DB-backed tests, replay session_001 vs golden, and writes a report to `artifacts/release_gate/`. Exit 0 = pass; exit 1 = first failure. To include UM790 smoke: `make release-gate-um790` (requires docker context `um790` and Alpaca keys).
-
-**Required env**: `DATABASE_URL` (Postgres, async), `REDIS_URL`. Alpaca keys can be dummy for replay.
+To include UM790 smoke after deploy: `make release-gate-um790` (requires docker context `um790` and Alpaca keys).
 
 ## Minimum pass criteria
 
