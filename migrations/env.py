@@ -23,7 +23,10 @@ target_metadata = Base.metadata
 
 def get_url() -> str:
     url = os.environ.get("DATABASE_URL", "postgresql://stockbot:stockbot@localhost:5432/stockbot")
-    if url.startswith("postgresql://"):
+    # Alembic runs sync; use psycopg2
+    if "postgresql+asyncpg://" in url:
+        url = url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+    elif url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return url
 

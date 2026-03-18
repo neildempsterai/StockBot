@@ -43,6 +43,21 @@ docker --context um790 compose -f infra/compose.yaml ps
 
 No Docker TCP listener should be exposed on the UM790; all control is over SSH.
 
+## Staging smoke run
+
+From repo root (laptop), after deploy:
+
+```bash
+export POSTGRES_PASSWORD=... ALPACA_API_KEY_ID=... ALPACA_API_SECRET_KEY=...
+./scripts/smoke_um790.sh
+```
+
+The script checks that context `um790` exists, brings up the stack, waits for the API, then hits `/health`, `/v1/intelligence/summary`, and `/v1/metrics/summary`. It prints recent API and worker logs. **Pass** = exit 0; **Fail** = exit non-zero and logs are printed. Migrations must be run before first deploy (e.g. run `alembic upgrade head` from a host that can reach the deployment Postgres, or run a one-off container with the app and alembic).
+
+## Release acceptance
+
+Before cutting a release or merging to main, satisfy [RELEASE_ACCEPTANCE_CHECKLIST.md](RELEASE_ACCEPTANCE_CHECKLIST.md): migrations apply, DB-backed tests pass, **replay session_001 matches golden outputs** (`make replay`), smoke passes, attribution shape stable, no duplicate signals/trades on replay restart. Run replay locally (or in CI with Postgres + Redis) before deploy.
+
 ## Restart / rollback
 
 Restart all:

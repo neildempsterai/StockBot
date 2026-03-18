@@ -42,3 +42,57 @@ Decision:
 - Implement `INTRA_EVENT_MOMO / 0.1.0` as the first end-to-end vertical slice.
 - Scheduled strategy runs remain shadow-only.
 - Manual paper-order endpoints may remain for testing, but strategy automation must not place paper orders in v0.1.
+
+## 2026-03-18 — Scrappy hardening accepted; next milestone is strategy bridge
+Status: Accepted
+
+Context:
+- Scrappy migration path is verified through current head.
+- Scrappy live symbol runs complete successfully.
+- Duplicate-run behavior and no-duplicate-note behavior are verified.
+- Telemetry, audit, source health, and recent notes endpoints return stable shapes.
+
+Decision:
+- Freeze Scrappy as the market-intelligence subsystem for StockBot.
+- Stop spending the next cycle on Scrappy hardening except for defects.
+- Build a bounded bridge from Scrappy outputs to deterministic strategy evaluation.
+- Scrappy remains advisory only and cannot create executable trade signals.
+- Every strategy signal that uses Scrappy must persist the exact Scrappy snapshot used at signal time.
+
+Consequences:
+- Next implementation focus is intelligence snapshot persistence, worker lookup, gating rules, and attribution metrics.
+- DB-backed Scrappy e2e tests remain important but are not the next product milestone unless they block deployment.
+
+## 2026-03-18 — Freeze feature expansion; next milestone is end-to-end validation
+Status: Accepted
+
+Context:
+- Scrappy intelligence snapshots, worker gating, attribution, API, UI, and migrations are now implemented.
+- Remaining gaps are integration proof, not capability gaps.
+
+Decision:
+- Stop adding new strategy features in the next cycle.
+- Build DB/Redis-backed end-to-end tests for Scrappy-gated signals and shadow trades.
+- Add a repeatable staging smoke run on the UM790 using Docker over Tailscale SSH.
+- Treat this as the validation gate before any further strategy expansion.
+
+Consequences:
+- Next work is test harness, e2e fixtures, smoke-run scripts, and operational verification.
+- New features are deferred unless a defect is found during validation.
+
+## 2026-03-18 — Next milestone is deterministic replay validation
+Status: Accepted
+
+Context:
+- Scrappy bridge, worker gating, attribution, DB-backed tests, and smoke path are implemented.
+- Remaining uncertainty is reproducibility across a fixed event sequence and release-to-release drift.
+
+Decision:
+- Freeze new feature work for the next cycle.
+- Add a deterministic replay pack for one fixed market session.
+- Use replay results as the main regression gate before expanding strategy scope or enabling stricter Scrappy modes.
+- A build is not accepted unless replay outputs are stable for signals, rejections, shadow trades, and attribution metrics.
+
+Consequences:
+- Next work is fixture capture, replay runner, golden outputs, and a release acceptance checklist.
+- Strategy expansion is deferred until replay stability is proven.

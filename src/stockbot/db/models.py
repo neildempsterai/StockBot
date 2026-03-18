@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime, Numeric, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -39,6 +39,43 @@ class Signal(Base):
     feature_snapshot_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     quote_snapshot_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     news_snapshot_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    intelligence_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("symbol_intelligence_snapshots.id"), nullable=True, index=True
+    )
+
+
+class SymbolIntelligenceSnapshot(Base):
+    """Symbol-scoped intelligence snapshot from Scrappy; used as gate/filter/tag only."""
+    __tablename__ = "symbol_intelligence_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    snapshot_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    freshness_minutes: Mapped[int] = mapped_column(nullable=False, default=0)
+    catalyst_direction: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    catalyst_strength: Mapped[int] = mapped_column(nullable=False, default=0)
+    sentiment_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evidence_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    source_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    source_domains_json: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    thesis_tags_json: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    headline_set_json: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    stale_flag: Mapped[bool] = mapped_column(nullable=False, default=False)
+    conflict_flag: Mapped[bool] = mapped_column(nullable=False, default=False)
+    raw_evidence_refs_json: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    scrappy_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    scrappy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="0.1.0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ScrappyGateRejection(Base):
+    """Scrappy gating rejections for attribution (scrappy_conflict, scrappy_stale, scrappy_missing, etc.)."""
+    __tablename__ = "scrappy_gate_rejections"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
 
 class Fill(Base):

@@ -27,6 +27,7 @@ class SignalEvent:
     feature_snapshot_json: dict | None = None
     quote_snapshot_json: dict | None = None
     news_snapshot_json: dict | None = None
+    intelligence_snapshot_id: int | None = None
 
 
 @dataclass

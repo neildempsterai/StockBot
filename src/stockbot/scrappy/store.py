@@ -1,7 +1,11 @@
-"""Scrappy persistence: scrappy_urls, scrappy_runs, market_intel_notes. Idempotent where appropriate."""
+"""Scrappy persistence: scrappy_urls, scrappy_runs, market_intel_notes, symbol_intelligence_snapshots."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from stockbot.scrappy.types import SymbolIntelligenceSnapshot
 from decimal import Decimal
 from uuid import uuid4
 
@@ -11,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stockbot.db.models import (
     MarketIntelNote,
+    ScrappyGateRejection,
     ScrappyRun,
     ScrappySourceHealth,
     ScrappyUrl,
+    SymbolIntelligenceSnapshot as SymbolIntelligenceSnapshotRow,
     WatchlistSymbol,
 )
 
@@ -383,6 +389,151 @@ async def upsert_source_health(
             last_error_message=(last_error_message or "")[:512],
         ))
     await session.commit()
+
+
+# ----- Symbol intelligence snapshots -----
+
+
+async def insert_intelligence_snapshot(
+    session: AsyncSession,
+    symbol: str,
+    snapshot_ts: datetime,
+    freshness_minutes: int,
+    catalyst_direction: str,
+    catalyst_strength: int,
+    *,
+    sentiment_label: str | None = None,
+    evidence_count: int = 0,
+    source_count: int = 0,
+    source_domains_json: list[str] | None = None,
+    thesis_tags_json: list[str] | None = None,
+    headline_set_json: list[str] | None = None,
+    stale_flag: bool = False,
+    conflict_flag: bool = False,
+    raw_evidence_refs_json: list[dict] | None = None,
+    scrappy_run_id: str | None = None,
+    scrappy_version: str = "0.1.0",
+) -> int:
+    """Insert symbol_intelligence_snapshots row; return id."""
+    row = SymbolIntelligenceSnapshotRow(
+        symbol=symbol,
+        snapshot_ts=snapshot_ts,
+        freshness_minutes=freshness_minutes,
+        catalyst_direction=catalyst_direction,
+        catalyst_strength=catalyst_strength,
+        sentiment_label=sentiment_label,
+        evidence_count=evidence_count,
+        source_count=source_count,
+        source_domains_json=source_domains_json,
+        thesis_tags_json=thesis_tags_json,
+        headline_set_json=headline_set_json,
+        stale_flag=stale_flag,
+        conflict_flag=conflict_flag,
+        raw_evidence_refs_json=raw_evidence_refs_json,
+        scrappy_run_id=scrappy_run_id,
+        scrappy_version=scrappy_version,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row.id
+
+
+async def insert_intelligence_snapshot_from_snapshot(
+    session: AsyncSession,
+    snapshot: "SymbolIntelligenceSnapshot",
+) -> int:
+    """Insert from SymbolIntelligenceSnapshot dataclass; return id."""
+    return await insert_intelligence_snapshot(
+        session,
+        symbol=snapshot.symbol,
+        snapshot_ts=snapshot.snapshot_ts,
+        freshness_minutes=snapshot.freshness_minutes,
+        catalyst_direction=snapshot.catalyst_direction,
+        catalyst_strength=snapshot.catalyst_strength,
+        sentiment_label=snapshot.sentiment_label,
+        evidence_count=snapshot.evidence_count,
+        source_count=snapshot.source_count,
+        source_domains_json=snapshot.source_domains or None,
+        thesis_tags_json=snapshot.thesis_tags or None,
+        headline_set_json=snapshot.headline_set or None,
+        stale_flag=snapshot.stale_flag,
+        conflict_flag=snapshot.conflict_flag,
+        raw_evidence_refs_json=snapshot.raw_evidence_refs or None,
+        scrappy_run_id=snapshot.scrappy_run_id,
+        scrappy_version=snapshot.scrappy_version,
+    )
+
+
+async def get_latest_snapshot_by_symbol(
+    session: AsyncSession,
+    symbol: str,
+) -> SymbolIntelligenceSnapshotRow | None:
+    """Return latest snapshot for symbol by snapshot_ts desc."""
+    r = await session.execute(
+        select(SymbolIntelligenceSnapshotRow)
+        .where(SymbolIntelligenceSnapshotRow.symbol == symbol)
+        .order_by(SymbolIntelligenceSnapshotRow.snapshot_ts.desc())
+        .limit(1)
+    )
+    return r.scalars().first()
+
+
+async def get_latest_non_stale_snapshot_by_symbol(
+    session: AsyncSession,
+    symbol: str,
+) -> SymbolIntelligenceSnapshotRow | None:
+    """Return latest non-stale snapshot for symbol."""
+    r = await session.execute(
+        select(SymbolIntelligenceSnapshotRow)
+        .where(
+            SymbolIntelligenceSnapshotRow.symbol == symbol,
+            SymbolIntelligenceSnapshotRow.stale_flag.is_(False),
+        )
+        .order_by(SymbolIntelligenceSnapshotRow.snapshot_ts.desc())
+        .limit(1)
+    )
+    return r.scalars().first()
+
+
+async def get_recent_snapshots(
+    session: AsyncSession,
+    limit: int = 50,
+    symbol: str | None = None,
+) -> list[SymbolIntelligenceSnapshotRow]:
+    """Return recent snapshots, optionally filtered by symbol."""
+    q = (
+        select(SymbolIntelligenceSnapshotRow)
+        .order_by(SymbolIntelligenceSnapshotRow.snapshot_ts.desc())
+        .limit(limit)
+    )
+    if symbol:
+        q = q.where(SymbolIntelligenceSnapshotRow.symbol == symbol)
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def insert_gate_rejection(
+    session: AsyncSession,
+    symbol: str,
+    reason_code: str,
+) -> None:
+    """Record a Scrappy gate rejection for attribution."""
+    session.add(ScrappyGateRejection(
+        symbol=symbol.strip().upper()[:32],
+        reason_code=reason_code.strip()[:64],
+    ))
+    await session.commit()
+
+
+async def get_gate_rejection_counts(session: AsyncSession) -> dict[str, int]:
+    """Return counts per reason_code for attribution."""
+    from sqlalchemy import func
+    r = await session.execute(
+        select(ScrappyGateRejection.reason_code, func.count(ScrappyGateRejection.id))
+        .group_by(ScrappyGateRejection.reason_code)
+    )
+    return {row[0]: row[1] for row in r.all()}
 
 
 async def get_source_health_all(session: AsyncSession) -> list[dict]:

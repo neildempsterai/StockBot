@@ -27,6 +27,7 @@ Signal rules:
 - One trade max per symbol per day.
 - No pyramiding.
 - Force flat by 15:45 ET.
+- Scrappy gating (when SCRAPPY_MODE != off): long allowed only when catalyst_direction is positive or neutral; short only when negative or neutral; reject on conflict, stale, or (if required) missing snapshot. Signal persists intelligence_snapshot_id when Scrappy snapshot was used.
 
 Shadow fills:
 - ideal mode

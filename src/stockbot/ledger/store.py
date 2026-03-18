@@ -38,6 +38,7 @@ class LedgerStore:
             feature_snapshot_json=event.feature_snapshot_json,
             quote_snapshot_json=event.quote_snapshot_json,
             news_snapshot_json=event.news_snapshot_json,
+            intelligence_snapshot_id=event.intelligence_snapshot_id,
         )
         self._session.add(row)
         await self._session.commit()

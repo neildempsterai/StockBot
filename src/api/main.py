@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from decimal import Decimal
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
 from sqlalchemy import func, select
 
 from stockbot.db.session import get_session_factory
-from stockbot.db.models import Signal, ShadowTrade
+from stockbot.db.models import Signal, ShadowTrade, SymbolIntelligenceSnapshot
 from stockbot.ledger.store import LedgerStore
 from stockbot.scrappy.api import router as scrappy_router
+from stockbot.scrappy.store import (
+    get_gate_rejection_counts,
+    get_latest_snapshot_by_symbol,
+    get_recent_snapshots,
+)
 
 
 @asynccontextmanager
@@ -72,16 +76,45 @@ async def list_signals(limit: int = Query(default=50, ge=1, le=200)) -> dict:
     }
 
 
+def _snapshot_to_dict(snap: SymbolIntelligenceSnapshot | None) -> dict | None:
+    if not snap:
+        return None
+    return {
+        "id": snap.id,
+        "symbol": snap.symbol,
+        "snapshot_ts": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
+        "freshness_minutes": snap.freshness_minutes,
+        "catalyst_direction": snap.catalyst_direction,
+        "catalyst_strength": snap.catalyst_strength,
+        "sentiment_label": snap.sentiment_label,
+        "evidence_count": snap.evidence_count,
+        "source_count": snap.source_count,
+        "stale_flag": snap.stale_flag,
+        "conflict_flag": snap.conflict_flag,
+        "scrappy_run_id": snap.scrappy_run_id,
+        "scrappy_version": snap.scrappy_version,
+    }
+
+
 @app.get("/v1/signals/{signal_uuid}")
 async def get_signal(signal_uuid: UUID) -> dict:
-    """Single signal by UUID."""
+    """Single signal by UUID; includes linked intelligence snapshot if present."""
     factory = get_session_factory()
     async with factory() as session:
         store = LedgerStore(session)
         s = await store.get_signal_by_uuid(signal_uuid)
+        snapshot = None
+        if s and getattr(s, "intelligence_snapshot_id", None):
+            from sqlalchemy import select
+            r = await session.execute(
+                select(SymbolIntelligenceSnapshot).where(
+                    SymbolIntelligenceSnapshot.id == s.intelligence_snapshot_id
+                ).limit(1)
+            )
+            snapshot = r.scalars().first()
     if not s:
         raise HTTPException(status_code=404, detail="not_found")
-    return {
+    out = {
         "signal_uuid": str(s.signal_uuid),
         "symbol": s.symbol,
         "side": s.side,
@@ -95,6 +128,54 @@ async def get_signal(signal_uuid: UUID) -> dict:
         "feature_snapshot_json": s.feature_snapshot_json,
         "quote_snapshot_json": s.quote_snapshot_json,
         "news_snapshot_json": s.news_snapshot_json,
+        "intelligence_snapshot_id": getattr(s, "intelligence_snapshot_id", None),
+    }
+    if snapshot:
+        out["intelligence_snapshot"] = _snapshot_to_dict(snapshot)
+    return out
+
+
+@app.get("/v1/intelligence/latest")
+async def intelligence_latest(symbol: str = Query(..., min_length=1, max_length=32)) -> dict:
+    """Latest intelligence snapshot for symbol."""
+    factory = get_session_factory()
+    async with factory() as session:
+        snap = await get_latest_snapshot_by_symbol(session, symbol.strip().upper())
+    if not snap:
+        raise HTTPException(status_code=404, detail="no_snapshot")
+    return _snapshot_to_dict(snap) or {}
+
+
+@app.get("/v1/intelligence/recent")
+async def intelligence_recent(
+    symbol: str | None = Query(None, max_length=32),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Recent intelligence snapshots, optionally filtered by symbol."""
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = await get_recent_snapshots(session, limit=limit, symbol=symbol.strip().upper() if symbol else None)
+    return {
+        "snapshots": [_snapshot_to_dict(r) for r in rows],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/intelligence/summary")
+async def intelligence_summary() -> dict:
+    """Summary: snapshot count, per-symbol latest catalyst direction."""
+    factory = get_session_factory()
+    async with factory() as session:
+        total = (await session.execute(select(func.count(SymbolIntelligenceSnapshot.id)))).scalar() or 0
+        rows = await get_recent_snapshots(session, limit=500)
+    by_symbol: dict[str, dict] = {}
+    for r in rows:
+        if r.symbol not in by_symbol:
+            by_symbol[r.symbol] = _snapshot_to_dict(r) or {}
+    return {
+        "snapshots_total": total,
+        "symbols_with_snapshot": len(by_symbol),
+        "by_symbol": by_symbol,
     }
 
 
@@ -127,17 +208,27 @@ async def list_shadow_trades(limit: int = Query(default=50, ge=1, le=200)) -> di
 
 @app.get("/v1/metrics/summary")
 async def metrics_summary() -> dict:
-    """Summary: signal count, shadow trade count, total net PnL."""
+    """Summary: signal count, shadow trade count, total net PnL, Scrappy attribution."""
     factory = get_session_factory()
     async with factory() as session:
         sig_count = (await session.execute(select(func.count(Signal.id)))).scalar() or 0
         trade_count = (await session.execute(select(func.count(ShadowTrade.id)))).scalar() or 0
         pnl_row = await session.execute(select(func.sum(ShadowTrade.net_pnl)))
         total_net_pnl = float(pnl_row.scalar() or 0)
+        with_snapshot = (
+            await session.execute(
+                select(func.count(Signal.id)).where(Signal.intelligence_snapshot_id.isnot(None))
+            )
+        ).scalar() or 0
+        without_snapshot = sig_count - with_snapshot
+        rejection_counts = await get_gate_rejection_counts(session)
     return {
         "signals_total": sig_count,
         "shadow_trades_total": trade_count,
         "total_net_pnl_shadow": round(total_net_pnl, 2),
+        "signals_with_scrappy_snapshot": with_snapshot,
+        "signals_without_scrappy_snapshot": without_snapshot,
+        "scrappy_gate_rejections": rejection_counts,
     }
 
 

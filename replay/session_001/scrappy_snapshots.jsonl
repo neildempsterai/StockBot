@@ -1,0 +1,2 @@
+{"symbol": "AAPL", "catalyst_direction": "positive", "stale_flag": false, "conflict_flag": false, "freshness_minutes": 30, "snapshot_ts": "2026-03-18T13:34:00Z"}
+{"symbol": "SPY", "catalyst_direction": "negative", "stale_flag": false, "conflict_flag": false, "freshness_minutes": 30, "snapshot_ts": "2026-03-18T13:34:00Z"}

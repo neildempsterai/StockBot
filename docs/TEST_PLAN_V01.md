@@ -55,3 +55,44 @@ Tailnet policy only allows your user to SSH to the UM790. Tailscale's access-con
 - **API**: `tests/test_api_strategies.py` — GET /health, /v1/strategies, /v1/signals, /v1/signals/{uuid}, /v1/shadow/trades, /v1/metrics/summary.
 - **Scheduler day reset**: Manual or integration — TRADED_TODAY_KEY cleared at session boundary (04:00 ET).
 - **One trade per symbol per day**: Worker uses Redis set `stockbot:strategies:intra_event_momo:traded_today`; scheduler clears daily.
+
+## Scrappy-gated strategy and e2e validation
+
+- **Gate logic (unit)**: `tests/test_worker_scrappy_e2e.py` — `scrappy_gate_check`: reject long when negative, short when positive; reject stale/conflict/missing when required.
+- **DB-backed e2e**: Same file + `tests/test_api_intelligence_db.py`, `tests/test_signal_attribution_e2e.py` — require `DATABASE_URL` (Postgres) and optionally `REDIS_URL`. Cover: snapshot persist/read, rejection counts, signal with `intelligence_snapshot_id`, metrics attribution keys.
+- **Replay helper**: `tests/helpers/replay.py` — push_bar, push_quote, push_news, create_snapshot_in_db for deterministic replay.
+- **Run DB-backed tests locally**: `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis` then `DATABASE_URL=postgresql+asyncpg://stockbot:PASSWORD@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0 pytest tests/test_scrappy_*.py tests/test_worker_scrappy_e2e.py tests/test_api_intelligence_db.py tests/test_signal_attribution_e2e.py -v`.
+- **Staging smoke**: `./scripts/smoke_um790.sh` — run after UM790 deploy; checks context, compose up, GET /health, /v1/intelligence/summary, /v1/metrics/summary, prints logs. **Pass** = script exits 0 and all endpoints 200; **Fail** = non-zero exit, logs printed.
+
+## Deterministic Replay Gate
+
+A release candidate must pass one fixed replay-day test pack.
+
+The replay gate must prove:
+- exact signal count
+- exact rejection count by reason_code
+- exact shadow trade count
+- exact accepted vs rejected Scrappy-gated candidates
+- exact attribution summary shape
+- no duplicate processing on replay restart
+- stable outputs across repeated runs with the same inputs
+
+Any change in golden outputs must be reviewed and explicitly accepted in the Decision Log before release.
+
+### How to run replay locally
+
+- Start Postgres + Redis (e.g. `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis`).
+- Set `DATABASE_URL`, `REDIS_URL`, and Alpaca keys (dummy OK for replay).
+- From repo root: `make replay` or `PYTHONPATH=.:src python scripts/run_replay.py --session replay/session_001`.
+- Exit 0 = outputs match `replay/session_001/expected_outputs.json`; exit 1 = mismatch and diff printed to stderr.
+
+### How to refresh golden outputs
+
+- After an intentional strategy or gate change, run:  
+  `PYTHONPATH=.:src python scripts/run_replay.py --session replay/session_001 --output replay/session_001/actual.json`.
+- Compare: `python scripts/replay_diff.py replay/session_001/expected_outputs.json replay/session_001/actual.json`.
+- If the diff is accepted, copy `actual.json` to `expected_outputs.json` and add a Decision Log entry for the change.
+
+### What counts as release-pass
+
+See [RELEASE_ACCEPTANCE_CHECKLIST.md](RELEASE_ACCEPTANCE_CHECKLIST.md): migrations apply, DB-backed tests pass, replay session_001 matches golden, smoke_um790 passes, attribution shape stable, no duplicate signals/trades on restart.

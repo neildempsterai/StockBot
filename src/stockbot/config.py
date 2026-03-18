@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     entry_end_et: str = Field(default="11:30", alias="ENTRY_END_ET")
     force_flat_et: str = Field(default="15:45", alias="FORCE_FLAT_ET")
 
+    # Scrappy strategy bridge: off | advisory | required
+    scrappy_mode: str = Field(default="advisory", alias="SCRAPPY_MODE")
+
 
 def get_settings() -> Settings:
     return Settings()

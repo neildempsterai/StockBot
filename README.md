@@ -17,7 +17,7 @@ See [docs/ARCH_INTEGRATION_ALPACA_TAILSCALE.md](docs/ARCH_INTEGRATION_ALPACA_TAI
 
 ## Strategy (v0.1)
 
-- **INTRA_EVENT_MOMO / 0.1.0**: shadow-only; entry 09:35–11:30 ET, force flat 15:45 ET; one trade max per symbol per day. See `docs/STRATEGY_CATALOG.md`.
+- **INTRA_EVENT_MOMO / 0.1.0**: shadow-only; entry 09:35–11:30 ET, force flat 15:45 ET; one trade max per symbol per day. Optional Scrappy intelligence gating: `SCRAPPY_MODE=off | advisory | required` (default advisory). See `docs/STRATEGY_CATALOG.md` and `docs/SCRAPPY_INTEGRATION.md`.
 
 ## Run locally
 
@@ -40,6 +40,20 @@ export REDIS_URL=redis://localhost:6379/0
 # Compose config (requires POSTGRES_PASSWORD and Alpaca keys in env or .env)
 POSTGRES_PASSWORD=secret ALPACA_API_KEY_ID=key ALPACA_API_SECRET_KEY=secret \
   docker compose -f infra/compose.yaml config
+
+# DB-backed tests (Postgres + Redis; expose ports first)
+docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis
+export DATABASE_URL=postgresql+asyncpg://stockbot:PASSWORD@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0
+pytest tests/test_scrappy_*.py tests/test_worker_scrappy_e2e.py tests/test_api_intelligence_db.py tests/test_signal_attribution_e2e.py -v
+
+# Deterministic replay (same env; release gate)
+make replay
+# Or: PYTHONPATH=.:src python scripts/run_replay.py --session replay/session_001
+# To refresh golden outputs after an intentional change: run with --output actual.json, review diff, then copy to expected_outputs.json and document in DECISION_LOG.md.
+# Compare two outputs: python scripts/replay_diff.py actual.json expected_outputs.json
+
+# UM790 staging smoke (after deploy; requires context um790 and env vars)
+./scripts/smoke_um790.sh
 ```
 
 ## Deploy to UM790 (Tailscale SSH)
@@ -49,5 +63,7 @@ POSTGRES_PASSWORD=secret ALPACA_API_KEY_ID=key ALPACA_API_SECRET_KEY=secret \
 # Then from repo root:
 docker --context um790 compose -f infra/compose.yaml up -d --build
 ```
+
+**Staging smoke run:** After deploy, run `./scripts/smoke_um790.sh` (requires `POSTGRES_PASSWORD`, `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`). Pass = /health, /v1/intelligence/summary, /v1/metrics/summary return 200; fail = non-zero exit and recent logs printed.
 
 See [docs/OPS_RUNBOOK_TAILSCALE_SSH.md](docs/OPS_RUNBOOK_TAILSCALE_SSH.md) for restart/rollback and no-public-port policy.

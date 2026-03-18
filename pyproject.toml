@@ -42,6 +42,9 @@ alpaca_reconciler = "alpaca_reconciler.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"stockbot.scrappy" = ["config/*.yml", "config/*.yaml"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

@@ -1,0 +1,6 @@
+{
+  "session_id": "session_001",
+  "date_utc": "2026-03-18",
+  "replay_version": "0.1.0",
+  "description": "Minimal fixed session: AAPL long, SPY short, deterministic bars/quotes/news/snapshots"
+}

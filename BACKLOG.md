@@ -24,3 +24,19 @@
 - [x] Per-source health: scrappy_source_health table, last_attempt_at/success_at, attempt/success/failure counts; GET /scrappy/sources/health.
 - [x] E2E test: test_scrappy_e2e.py — run → notes → repeat run → no duplicate notes; idempotent insert by dedup_hash.
 - [x] Hardening: source policy with reason codes; policy-driven acquisition; strict JSON LLM draft; source health fetch vs note yield; run counters and outcome from actuals; migration 006; tests (registry, notes, run_outcome).
+- [ ] Create symbol intelligence snapshot model from Scrappy outputs
+- [ ] Link strategy signals to intelligence snapshots
+- [ ] Add worker-side deterministic Scrappy gating rules
+- [ ] Add attribution metrics: with Scrappy gate vs without Scrappy gate
+- [ ] Add stale/conflict/missing intelligence rejection counters
+- [ ] Add Docker compose test profile with Postgres + Redis for Scrappy e2e tests
+- [ ] Add DB/Redis-backed e2e tests for Scrappy-gated worker flow
+- [ ] Add real integration test for signal -> shadow trade -> attribution persistence
+- [ ] Add staging smoke script for UM790 deployment and health verification
+- [ ] Add fixture-driven replay day for deterministic regression testing
+- [ ] Add pass/fail validation checklist for Scrappy-gated strategy behavior
+- [ ] Add fixed replay-day dataset for one market session
+- [ ] Add replay runner that feeds bars, quotes, trades, news, and Scrappy snapshots deterministically
+- [ ] Add golden-output assertions for signals, rejections, shadow trades, and metrics
+- [ ] Add regression-diff report for replay changes between commits
+- [ ] Add release acceptance checklist based on replay + smoke

@@ -1,0 +1,11 @@
+# Override to expose Postgres and Redis for local/CI Scrappy e2e tests.
+# Run: docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis
+# Then: DATABASE_URL=postgresql+asyncpg://stockbot:$POSTGRES_PASSWORD@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0 pytest tests/test_scrappy_*.py -v
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"

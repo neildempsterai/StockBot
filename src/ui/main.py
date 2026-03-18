@@ -12,7 +12,7 @@ API_BASE = os.environ.get("STOCKBOT_API_BASE", "http://localhost:8000")
 async def homepage(request):
     return PlainTextResponse(
         "StockBot Admin (internal only)\n"
-        "Endpoints: /health, /signals, /shadow-trades, /metrics, /config\n"
+        "Endpoints: /health, /signals, /shadow-trades, /metrics, /config, /intelligence, /intelligence/summary\n"
     )
 
 
@@ -52,6 +52,16 @@ async def config_page(request):
     return JSONResponse(data if data else {"strategies": []})
 
 
+async def intelligence_page(request):
+    data = await _get("/v1/intelligence/recent?limit=20")
+    return JSONResponse(data if data else {"snapshots": [], "count": 0})
+
+
+async def intelligence_summary_page(request):
+    data = await _get("/v1/intelligence/summary")
+    return JSONResponse(data if data else {"snapshots_total": 0, "symbols_with_snapshot": 0, "by_symbol": {}})
+
+
 app = Starlette(
     debug=False,
     routes=[
@@ -61,5 +71,7 @@ app = Starlette(
         Route("/shadow-trades", shadow_trades_page),
         Route("/metrics", metrics_page),
         Route("/config", config_page),
+        Route("/intelligence", intelligence_page),
+        Route("/intelligence/summary", intelligence_summary_page),
     ],
 )

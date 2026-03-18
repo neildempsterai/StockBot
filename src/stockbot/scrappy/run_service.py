@@ -16,6 +16,7 @@ from stockbot.scrappy.notes import (
     validate_note_payload,
 )
 from stockbot.scrappy.source_policy import apply_policy_for_candidate, policy_blocked_fn
+from stockbot.scrappy.snapshot import build_snapshot_from_notes
 from stockbot.scrappy.store import (
     count_notes,
     create_scrappy_run,
@@ -24,6 +25,7 @@ from stockbot.scrappy.store import (
     get_recent_runs,
     get_seen_url_hashes,
     get_watchlist_symbols,
+    insert_intelligence_snapshot_from_snapshot,
     insert_market_intel_note,
     upsert_scrappy_url,
     upsert_source_health,
@@ -59,9 +61,9 @@ def _compute_outcome(
     """Compute outcome code from actual counters; no hand-written guesses."""
     if candidate_count == 0:
         return OUTCOME_NO_CANDIDATES
+    if any("validate" in e.lower() for e in errors_list[:10]):
+        return OUTCOME_FAILED_VALIDATION
     if any("failed" in e.lower() or "error" in e.lower() for e in errors_list[:5]):
-        if any("validate" in e.lower() for e in errors_list):
-            return OUTCOME_FAILED_VALIDATION
         if any("insert" in e.lower() or "persist" in e.lower() for e in errors_list):
             return OUTCOME_FAILED_PERSISTENCE
         if any("fetch" in e.lower() for e in errors_list):
@@ -314,6 +316,20 @@ async def run_scrappy(
                 notes_rejected_count=notes_rejected_count,
                 errors=errors_str,
             )
+            # Persist symbol intelligence snapshots for strategy bridge
+            for sym in (run_scope.get("symbols") or []):
+                if not sym or not isinstance(sym, str):
+                    continue
+                try:
+                    notes = await get_recent_notes(
+                        session, symbol=sym.strip().upper()[:32], limit=50
+                    )
+                    snap = build_snapshot_from_notes(
+                        sym.strip().upper()[:32], notes, scrappy_run_id=run_id
+                    )
+                    await insert_intelligence_snapshot_from_snapshot(session, snap)
+                except Exception as e:
+                    logger.warning("snapshot_persist_failed symbol=%s run_id=%s error=%s", sym, run_id, e)
             return {
                 "run_id": run_id,
                 "run_type": run_type,
@@ -347,21 +363,24 @@ async def get_notes_recent(
     content_mode: str | None = None,
     since_hours: int | None = None,
 ) -> list[dict]:
-    """Return recent market_intel_notes as dicts with optional filters."""
-    factory = get_session_factory()
+    """Return recent market_intel_notes as dicts with optional filters. Empty when DB unavailable."""
     since = None
     if since_hours is not None and since_hours > 0:
         since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    async with factory() as session:
-        notes = await get_recent_notes(
-            session,
-            limit=limit,
-            symbol=symbol,
-            catalyst_type=catalyst_type,
-            sentiment_label=sentiment_label,
-            content_mode=content_mode,
-            since=since,
-        )
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            notes = await get_recent_notes(
+                session,
+                limit=limit,
+                symbol=symbol,
+                catalyst_type=catalyst_type,
+                sentiment_label=sentiment_label,
+                content_mode=content_mode,
+                since=since,
+            )
+    except Exception:
+        notes = []
     out: list[dict] = []
     for n in notes:
         out.append({
@@ -381,11 +400,15 @@ async def get_notes_recent(
 
 
 async def get_telemetry(limit: int = 50, hours: int = 24) -> dict:
-    """Truthful telemetry from DB: runs, counts, outcome codes, zero-yield streak."""
-    factory = get_session_factory()
-    async with factory() as session:
-        runs = await get_recent_runs(session, limit=limit)
-        notes_total = await count_notes(session)
+    """Truthful telemetry from DB: runs, counts, outcome codes, zero-yield streak. Empty when DB unavailable."""
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            runs = await get_recent_runs(session, limit=limit)
+            notes_total = await count_notes(session)
+    except Exception:
+        runs = []
+        notes_total = 0
     run_dicts = []
     for r in runs:
         run_dicts.append({
@@ -419,11 +442,15 @@ async def get_telemetry(limit: int = 50, hours: int = 24) -> dict:
 
 
 async def get_audit(limit: int = 10) -> dict:
-    """Truthful audit: last N runs with full counters for reconciliation."""
-    factory = get_session_factory()
-    async with factory() as session:
-        runs = await get_recent_runs(session, limit=limit)
-        notes_total = await count_notes(session)
+    """Truthful audit: last N runs with full counters for reconciliation. Empty when DB unavailable."""
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            runs = await get_recent_runs(session, limit=limit)
+            notes_total = await count_notes(session)
+    except Exception:
+        runs = []
+        notes_total = 0
     run_list = []
     for r in runs:
         notes_inserted = r.notes_created or 0
