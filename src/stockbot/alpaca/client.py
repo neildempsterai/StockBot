@@ -1,7 +1,7 @@
 """Alpaca REST client. Cold start, reconnect recovery, reconciliation. feed=iex."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -120,10 +120,10 @@ class AlpacaClient:
     @staticmethod
     def _parse_ts(ts: Any) -> datetime:
         if ts is None:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
         if isinstance(ts, str):
             return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     # ---------- Orders (idempotency: client_order_id = signal_uuid) ----------
 

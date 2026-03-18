@@ -7,17 +7,25 @@ Shadow-only: no Alpaca orders. One trade max per symbol per day. Force flat by 1
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 import redis.asyncio as redis
+
 from stockbot.config import get_settings
 from stockbot.db.session import get_session_factory
+from stockbot.gateways.market_gateway import (
+    REDIS_STREAM_BARS,
+    REDIS_STREAM_NEWS,
+    REDIS_STREAM_QUOTES,
+    REDIS_STREAM_TRADES,
+)
 from stockbot.ledger.events import SignalEvent
 from stockbot.ledger.store import LedgerStore
 from stockbot.shadow.engine import (
@@ -32,20 +40,14 @@ from stockbot.shadow.engine import (
 from stockbot.strategies.intra_event_momo import (
     STRATEGY_ID,
     STRATEGY_VERSION,
+    FeatureSet,
     NewsItem,
     classify_news_side,
     evaluate,
     exit_stop_target_prices,
     news_keyword_hits,
 )
-from stockbot.strategies.intra_event_momo import FeatureSet
 from stockbot.strategies.state import BarLike, SymbolState
-from stockbot.gateways.market_gateway import (
-    REDIS_STREAM_BARS,
-    REDIS_STREAM_QUOTES,
-    REDIS_STREAM_TRADES,
-    REDIS_STREAM_NEWS,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,9 +110,9 @@ def _parse_bar_from_payload(payload: dict) -> BarLike | None:
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
-            ts = datetime.now(timezone.utc)
+            ts = datetime.now(UTC)
     else:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
     return BarLike(
         symbol=bar.get("symbol", ""),
         open=Decimal(str(bar.get("o", bar.get("open", 0)))),
@@ -132,9 +134,9 @@ def _parse_quote_from_payload(payload: dict) -> tuple[str, Decimal, Decimal, dat
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
-            ts = datetime.now(timezone.utc)
+            ts = datetime.now(UTC)
     else:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
     bid = q.get("bp") if "bp" in q else q.get("bid_price", 0)
     ask = q.get("ap") if "ap" in q else q.get("ask_price", 0)
     return (
@@ -155,9 +157,9 @@ def _parse_trade_from_payload(payload: dict) -> tuple[str, Decimal, datetime] | 
         try:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
-            ts = datetime.now(timezone.utc)
+            ts = datetime.now(UTC)
     else:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
     return (
         t.get("symbol", ""),
         Decimal(str(t.get("price", t.get("p", 0)))),
@@ -174,9 +176,9 @@ def _parse_news_from_payload(payload: dict) -> NewsItem | None:
     summary = raw.get("summary", "") or raw.get("content", "")[:500]
     created = raw.get("created_at") or raw.get("updated_at")
     try:
-        published = datetime.fromisoformat(created.replace("Z", "+00:00")) if created else datetime.now(timezone.utc)
+        published = datetime.fromisoformat(created.replace("Z", "+00:00")) if created else datetime.now(UTC)
     except Exception:
-        published = datetime.now(timezone.utc)
+        published = datetime.now(UTC)
     symbols = raw.get("symbols") or []
     sym = symbols[0] if symbols else None
     return NewsItem(headline=headline, summary=summary, published_at=published, symbol=sym, raw=raw)
@@ -202,10 +204,8 @@ async def _load_last_ids(redis_client: redis.Redis) -> dict[str, str]:
 
 async def _save_last_ids(redis_client: redis.Redis, last_ids: dict[str, str]) -> None:
     """Persist last stream IDs so restarts do not double-process."""
-    try:
+    with contextlib.suppress(Exception):
         await redis_client.set(REDIS_LAST_IDS_KEY, json.dumps(last_ids), ex=86400 * 7)
-    except Exception:
-        pass
 
 
 async def run_worker() -> None:
@@ -236,7 +236,7 @@ async def run_worker() -> None:
                 try:
                     await redis_client.set(
                         HEARTBEAT_KEY,
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         ex=HEARTBEAT_TTL_SEC,
                     )
                     last_heartbeat = time.monotonic()
@@ -541,7 +541,7 @@ async def _on_bar(
             strategy_version=STRATEGY_VERSION,
             feed="iex",
             quote_ts=last_bar.timestamp,
-            ingest_ts=datetime.now(timezone.utc),
+            ingest_ts=datetime.now(UTC),
             bid=bid,
             ask=ask,
             last=sym_state.latest_last,

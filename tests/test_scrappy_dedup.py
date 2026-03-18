@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 from stockbot.scrappy.dedup import (
     DEDUP_DUPLICATE_IN_BATCH,
     DEDUP_JUNK_DOMAIN,

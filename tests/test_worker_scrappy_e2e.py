@@ -94,8 +94,10 @@ def requires_db():
 def _db_reachable() -> bool:
     try:
         import asyncio
-        from stockbot.db.session import get_session_factory
+
         from sqlalchemy import text
+
+        from stockbot.db.session import get_session_factory
         async def _check():
             factory = get_session_factory()
             async with factory() as session:
@@ -122,7 +124,10 @@ async def test_rejection_persisted_and_counted(requires_db) -> None:
 @pytest.mark.asyncio
 async def test_snapshot_persisted_and_retrievable(requires_db) -> None:
     from tests.helpers.replay import create_snapshot_in_db
+
+    from stockbot.db.session import get_session_factory
     from stockbot.scrappy.store import get_latest_snapshot_by_symbol
+
     factory = get_session_factory()
     async with factory() as session:
         sid = await create_snapshot_in_db(session, "AAPL", "positive", stale_flag=False)

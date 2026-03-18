@@ -56,7 +56,14 @@ The script checks that context `um790` exists, brings up the stack, waits for th
 
 ## Release acceptance
 
-Before cutting a release or merging to main, satisfy [RELEASE_ACCEPTANCE_CHECKLIST.md](RELEASE_ACCEPTANCE_CHECKLIST.md): migrations apply, DB-backed tests pass, **replay session_001 matches golden outputs** (`make replay`), smoke passes, attribution shape stable, no duplicate signals/trades on replay restart. Run replay locally (or in CI with Postgres + Redis) before deploy.
+Before cutting a release or merging to main, run the release gate and satisfy [RELEASE_ACCEPTANCE_CHECKLIST.md](RELEASE_ACCEPTANCE_CHECKLIST.md):
+
+- **Exact command**: From repo root, with Postgres and Redis up:  
+  `export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot REDIS_URL=redis://localhost:6379/0`  
+  then `make release-gate`. Optional: `make release-gate-um790` to include UM790 smoke.
+- **Required env**: `DATABASE_URL`, `REDIS_URL`; for smoke also `POSTGRES_PASSWORD`, `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`.
+- **Report files**: Written to `artifacts/release_gate/report_*.json` and `*.md`; inspect for `release_gate_pass: true`.
+- **What blocks release**: Migrations fail, DB-backed tests fail, replay session_001 does not match golden outputs, or smoke fails when run.
 
 ## Restart / rollback
 

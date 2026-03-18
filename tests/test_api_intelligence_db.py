@@ -5,6 +5,8 @@ Requires DATABASE_URL (Postgres); skips when unavailable.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -16,14 +18,9 @@ from stockbot.ledger.events import SignalEvent
 from stockbot.ledger.store import LedgerStore
 from stockbot.scrappy.store import (
     get_gate_rejection_counts,
-    get_latest_snapshot_by_symbol,
-    get_recent_snapshots,
     insert_gate_rejection,
     insert_intelligence_snapshot,
 )
-from decimal import Decimal
-from datetime import datetime, timezone
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -31,8 +28,10 @@ pytestmark = pytest.mark.asyncio
 def _db_reachable() -> bool:
     try:
         import asyncio
-        from stockbot.db.session import get_session_factory
+
         from sqlalchemy import text
+
+        from stockbot.db.session import get_session_factory
         async def _check():
             factory = get_session_factory()
             async with factory() as session:
@@ -62,7 +61,7 @@ async def test_intelligence_latest_returns_snapshot_when_exists(requires_db, cli
     factory = get_session_factory()
     async with factory() as session:
         await insert_intelligence_snapshot(
-            session, "TEST", datetime.now(timezone.utc), 30,
+            session, "TEST", datetime.now(UTC), 30,
             "positive", 50, sentiment_label="positive",
             evidence_count=1, source_count=1,
         )
@@ -120,7 +119,7 @@ async def test_signal_detail_includes_intelligence_snapshot_when_linked(requires
     snap_id = None
     async with factory() as session:
         snap_id = await insert_intelligence_snapshot(
-            session, "LINK", datetime.now(timezone.utc), 30,
+            session, "LINK", datetime.now(UTC), 30,
             "neutral", 25, sentiment_label="neutral",
             evidence_count=0, source_count=0,
         )
@@ -135,8 +134,8 @@ async def test_signal_detail_includes_intelligence_snapshot_when_linked(requires
             strategy_id="INTRA_EVENT_MOMO",
             strategy_version="0.1.0",
             feed="iex",
-            quote_ts=datetime.now(timezone.utc),
-            ingest_ts=datetime.now(timezone.utc),
+            quote_ts=datetime.now(UTC),
+            ingest_ts=datetime.now(UTC),
             bid=Decimal("100"),
             ask=Decimal("100.5"),
             last=Decimal("100"),

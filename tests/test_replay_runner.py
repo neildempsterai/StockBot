@@ -24,8 +24,9 @@ def _db_redis_available() -> bool:
     try:
         import asyncio
         sys.path.insert(0, str(REPO_ROOT / "src"))
-        from stockbot.db.session import get_session_factory
         from sqlalchemy import text
+
+        from stockbot.db.session import get_session_factory
         async def check():
             factory = get_session_factory()
             async with factory() as session:

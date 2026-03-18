@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -52,7 +52,7 @@ async def run_reconciliation() -> None:
     factory = get_session_factory()
     async with factory() as session:
         log = ReconciliationLog(
-            run_at=datetime.now(timezone.utc),
+            run_at=datetime.now(UTC),
             orders_matched=orders_matched,
             orders_mismatch=orders_mismatch,
             positions_matched=positions_matched,

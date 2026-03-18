@@ -1,8 +1,6 @@
 """Tests for Scrappy run outcome codes and policy-driven fetch behavior."""
 from __future__ import annotations
 
-import pytest
-
 from stockbot.scrappy.run_service import (
     OUTCOME_FAILED_VALIDATION,
     OUTCOME_NO_CANDIDATES,

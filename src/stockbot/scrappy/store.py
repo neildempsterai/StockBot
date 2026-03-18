@@ -1,7 +1,7 @@
 """Scrappy persistence: scrappy_urls, scrappy_runs, market_intel_notes, symbol_intelligence_snapshots."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,13 +19,15 @@ from stockbot.db.models import (
     ScrappyRun,
     ScrappySourceHealth,
     ScrappyUrl,
-    SymbolIntelligenceSnapshot as SymbolIntelligenceSnapshotRow,
     WatchlistSymbol,
+)
+from stockbot.db.models import (
+    SymbolIntelligenceSnapshot as SymbolIntelligenceSnapshotRow,
 )
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def upsert_scrappy_url(
@@ -441,7 +443,7 @@ async def insert_intelligence_snapshot(
 
 async def insert_intelligence_snapshot_from_snapshot(
     session: AsyncSession,
-    snapshot: "SymbolIntelligenceSnapshot",
+    snapshot: SymbolIntelligenceSnapshot,
 ) -> int:
     """Insert from SymbolIntelligenceSnapshot dataclass; return id."""
     return await insert_intelligence_snapshot(

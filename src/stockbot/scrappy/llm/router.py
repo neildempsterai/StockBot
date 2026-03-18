@@ -39,7 +39,7 @@ def _load_route_config() -> dict[str, dict[str, Any]]:
     if path.is_file():
         try:
             import yaml
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             for task, cfg in (data.get("tasks") or {}).items():
                 if task in SCRAPPY_TASKS:

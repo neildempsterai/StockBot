@@ -1,8 +1,6 @@
 """Tests for Scrappy note schema: catalyst taxonomy, sentiment, validation."""
 from __future__ import annotations
 
-import pytest
-
 from stockbot.scrappy.schema import (
     CATALYST_TYPES,
     SENTIMENT_LABELS,

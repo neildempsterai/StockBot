@@ -1,8 +1,8 @@
 """Optional full-article fetch for open_text domains. Disabled by default."""
 from __future__ import annotations
 
-import re
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)

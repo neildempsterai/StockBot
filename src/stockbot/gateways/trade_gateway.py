@@ -5,14 +5,11 @@ Stores fill events with feed provenance. client_order_id = signal_uuid.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from stockbot.alpaca.trading_stream import TradingStreamClient
-from stockbot.config import get_settings
 from stockbot.db.session import get_session_factory
 from stockbot.ledger.events import FillEvent
 from stockbot.ledger.store import LedgerStore
@@ -29,7 +26,7 @@ async def handle_trade_update(update) -> None:  # noqa: ANN001
         if existing and update.event == "fill":
             # Idempotent: already have a full fill row; optionally update alpaca_avg_entry_price
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             signal_uuid = UUID(update.client_order_id)
         except (ValueError, TypeError):

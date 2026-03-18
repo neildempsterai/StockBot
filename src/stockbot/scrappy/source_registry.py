@@ -33,7 +33,7 @@ def load_source_registry(config_dir: Path | None = None) -> dict[str, Any]:
     path = base / "source_registry.yml"
     data: dict[str, Any] = {"domains": {}, "default_content_mode": "metadata_only"}
     if path.exists() and yaml is not None:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         data["domains"] = dict(raw.get("domains") or {})
         data["default_content_mode"] = raw.get("default_content_mode") or "metadata_only"

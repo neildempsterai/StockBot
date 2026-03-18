@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from stockbot.db.session import get_session_factory
 from stockbot.scrappy.run_service import (
     get_audit,
     get_notes_recent,
@@ -14,7 +15,6 @@ from stockbot.scrappy.run_service import (
 )
 from stockbot.scrappy.sources import load_scrappy_sources
 from stockbot.scrappy.store import get_source_health_all
-from stockbot.db.session import get_session_factory
 
 router = APIRouter(prefix="/scrappy", tags=["scrappy"])
 
@@ -140,6 +140,7 @@ def _validate_watchlist_symbol(symbol: str) -> str:
 async def scrappy_watchlist_add(symbol: str) -> dict[str, Any]:
     """Add symbol to watchlist. Validates symbol format."""
     from fastapi import HTTPException
+
     from stockbot.scrappy.store import add_watchlist_symbol
     try:
         validated = _validate_watchlist_symbol(symbol)

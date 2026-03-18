@@ -5,7 +5,7 @@ Redis stream format matches market_gateway fan-out.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from stockbot.gateways.market_gateway import (
@@ -17,7 +17,7 @@ from stockbot.gateways.market_gateway import (
 
 
 def _iso(ts: datetime) -> str:
-    return ts.isoformat().replace("+00:00", "Z") if ts.tzinfo else ts.replace(tzinfo=timezone.utc).isoformat()
+    return ts.isoformat().replace("+00:00", "Z") if ts.tzinfo else ts.replace(tzinfo=UTC).isoformat()
 
 
 async def push_bar(
@@ -31,7 +31,7 @@ async def push_bar(
     timestamp: datetime | None = None,
 ) -> str:
     """Push one minute bar to Redis; returns stream id."""
-    ts = timestamp or datetime.now(timezone.utc)
+    ts = timestamp or datetime.now(UTC)
     body = {
         "type": "bar",
         "payload": {
@@ -45,7 +45,7 @@ async def push_bar(
                 "timestamp": _iso(ts),
             },
         },
-        "ingest_ts": _iso(datetime.now(timezone.utc)),
+        "ingest_ts": _iso(datetime.now(UTC)),
     }
     return await redis_client.xadd(REDIS_STREAM_BARS, {"data": json.dumps(body)}, maxlen=5000)
 
@@ -58,7 +58,7 @@ async def push_quote(
     timestamp: datetime | None = None,
 ) -> str:
     """Push one quote to Redis; returns stream id."""
-    ts = timestamp or datetime.now(timezone.utc)
+    ts = timestamp or datetime.now(UTC)
     body = {
         "type": "quote",
         "payload": {
@@ -69,7 +69,7 @@ async def push_quote(
                 "timestamp": _iso(ts),
             },
         },
-        "ingest_ts": _iso(datetime.now(timezone.utc)),
+        "ingest_ts": _iso(datetime.now(UTC)),
     }
     return await redis_client.xadd(REDIS_STREAM_QUOTES, {"data": json.dumps(body)}, maxlen=10000)
 
@@ -82,7 +82,7 @@ async def push_news(
     published_at: datetime | None = None,
 ) -> str:
     """Push one news item to Redis; returns stream id."""
-    ts = published_at or datetime.now(timezone.utc)
+    ts = published_at or datetime.now(UTC)
     raw = {
         "headline": headline,
         "summary": summary,
@@ -90,7 +90,7 @@ async def push_news(
         "created_at": _iso(ts),
         "updated_at": _iso(ts),
     }
-    body = {"type": "news", "payload": {"raw": raw}, "ingest_ts": _iso(datetime.now(timezone.utc))}
+    body = {"type": "news", "payload": {"raw": raw}, "ingest_ts": _iso(datetime.now(UTC))}
     return await redis_client.xadd(REDIS_STREAM_NEWS, {"data": json.dumps(body)}, maxlen=5000)
 
 
@@ -101,7 +101,7 @@ async def push_trade(
     timestamp: datetime | None = None,
 ) -> str:
     """Push one trade to Redis; returns stream id."""
-    ts = timestamp or datetime.now(timezone.utc)
+    ts = timestamp or datetime.now(UTC)
     body = {
         "type": "trade",
         "payload": {
@@ -111,7 +111,7 @@ async def push_trade(
                 "timestamp": _iso(ts),
             },
         },
-        "ingest_ts": _iso(datetime.now(timezone.utc)),
+        "ingest_ts": _iso(datetime.now(UTC)),
     }
     return await redis_client.xadd(REDIS_STREAM_TRADES, {"data": json.dumps(body)}, maxlen=10000)
 
@@ -127,12 +127,13 @@ async def create_snapshot_in_db(
     scrappy_run_id: str | None = None,
 ) -> int:
     """Insert symbol_intelligence_snapshots row; returns id. Use from async test."""
+    from datetime import datetime
+
     from stockbot.scrappy.store import insert_intelligence_snapshot
-    from datetime import datetime, timezone
     return await insert_intelligence_snapshot(
         session,
         symbol=symbol,
-        snapshot_ts=datetime.now(timezone.utc),
+        snapshot_ts=datetime.now(UTC),
         freshness_minutes=freshness_minutes if not stale_flag else 200,
         catalyst_direction=catalyst_direction,
         catalyst_strength=50,

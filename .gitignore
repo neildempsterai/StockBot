@@ -43,3 +43,6 @@ htmlcov/
 *.log
 logs/
 data/local/
+
+# Release gate reports (generated)
+artifacts/release_gate/

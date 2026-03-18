@@ -24,7 +24,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return {}
     if yaml is None:
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 

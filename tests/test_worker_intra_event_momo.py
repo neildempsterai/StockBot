@@ -2,26 +2,31 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from stockbot.gateways.market_gateway import (
+    REDIS_STREAM_BARS,
+    REDIS_STREAM_NEWS,
+    REDIS_STREAM_QUOTES,
+    REDIS_STREAM_TRADES,
+)
 from stockbot.strategies.state import BarLike, SymbolState
 from worker.main import (
-    TRADED_TODAY_KEY,
     REDIS_LAST_IDS_KEY,
+    TRADED_TODAY_KEY,
+    _load_last_ids,
+    _on_bar,
     _parse_bar_from_payload,
+    _parse_news_from_payload,
     _parse_quote_from_payload,
     _parse_trade_from_payload,
-    _parse_news_from_payload,
-    _load_last_ids,
     _save_last_ids,
-    _on_bar,
 )
-from stockbot.gateways.market_gateway import REDIS_STREAM_BARS, REDIS_STREAM_QUOTES, REDIS_STREAM_NEWS, REDIS_STREAM_TRADES
 
 
 def test_parse_bar_from_payload_serialized_bar() -> None:
@@ -139,7 +144,7 @@ async def test_worker_ignores_out_of_universe() -> None:
     # State only has AAPL; bar for XYZ should not be in state
     universe_set = frozenset(["AAPL"])
     state = {"AAPL": SymbolState(symbol="AAPL")}
-    bar = BarLike(symbol="XYZ", open=Decimal("100"), high=Decimal("101"), low=Decimal("99"), close=Decimal("100.5"), volume=1000, timestamp=datetime.now(timezone.utc))
+    bar = BarLike(symbol="XYZ", open=Decimal("100"), high=Decimal("101"), low=Decimal("99"), close=Decimal("100.5"), volume=1000, timestamp=datetime.now(UTC))
     assert bar.symbol not in universe_set
     # The main loop only calls _on_bar when bar.symbol in universe_set, so XYZ never gets _on_bar
     assert "XYZ" not in state
@@ -167,7 +172,7 @@ async def test_worker_consumes_bar_emits_signal_and_opens_shadow() -> None:
             low=Decimal("145") + Decimal(i),
             close=Decimal("146.5") + Decimal(i),
             volume=100000,
-            timestamp=datetime(2026, 3, 17, 13, 35 + i, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 3, 17, 13, 35 + i, 0, tzinfo=UTC),
         ))
     sym_state.bars.append(BarLike(
         symbol="AAPL",
@@ -176,13 +181,13 @@ async def test_worker_consumes_bar_emits_signal_and_opens_shadow() -> None:
         low=Decimal("147.5"),
         close=Decimal("149"),
         volume=2000000,
-        timestamp=datetime(2026, 3, 17, 14, 35, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 3, 17, 14, 35, 0, tzinfo=UTC),
     ))
     from stockbot.strategies.intra_event_momo import NewsItem
     sym_state.news.append(NewsItem(
         headline="AAPL beats earnings",
         summary="raised guidance",
-        published_at=datetime(2026, 3, 17, 14, 0, 0, tzinfo=timezone.utc),
+        published_at=datetime(2026, 3, 17, 14, 0, 0, tzinfo=UTC),
         symbol="AAPL",
         raw={},
     ))
@@ -218,7 +223,7 @@ async def test_worker_enforces_one_trade_per_symbol_per_day() -> None:
     sym_state = SymbolState(symbol="AAPL")
     sym_state.prev_close = Decimal("145")
     sym_state.bars = [
-        BarLike("AAPL", Decimal("146"), Decimal("147"), Decimal("145"), Decimal("146.5"), 100000, datetime(2026, 3, 17, 13, 35 + i, 0, tzinfo=timezone.utc))
+        BarLike("AAPL", Decimal("146"), Decimal("147"), Decimal("145"), Decimal("146.5"), 100000, datetime(2026, 3, 17, 13, 35 + i, 0, tzinfo=UTC))
         for i in range(6)
     ]
     sym_state.latest_bid = Decimal("150")
@@ -226,7 +231,7 @@ async def test_worker_enforces_one_trade_per_symbol_per_day() -> None:
     sym_state.latest_last = Decimal("150")
     sym_state.news.append(
         __import__("stockbot.strategies.intra_event_momo", fromlist=["NewsItem"]).NewsItem(
-            headline="beat", summary="", published_at=datetime(2026, 3, 17, 14, 0, tzinfo=timezone.utc), symbol="AAPL", raw={}
+            headline="beat", summary="", published_at=datetime(2026, 3, 17, 14, 0, tzinfo=UTC), symbol="AAPL", raw={}
         )
     )
     shadow_state = __import__("stockbot.shadow.engine", fromlist=["ShadowState"]).ShadowState()
@@ -256,8 +261,8 @@ async def test_worker_closes_shadow_on_stop() -> None:
     sym_state.latest_ask = Decimal("98.05")
     sym_state.latest_last = Decimal("98")
     sym_state.bars = [
-        BarLike("AAPL", Decimal("100"), Decimal("102"), Decimal("99"), Decimal("101"), 10000, datetime(2026, 3, 17, 14, 30, 0, tzinfo=timezone.utc)),
-        BarLike("AAPL", Decimal("101"), Decimal("101.5"), Decimal("97"), Decimal("97.5"), 10000, datetime(2026, 3, 17, 14, 31, 0, tzinfo=timezone.utc)),
+        BarLike("AAPL", Decimal("100"), Decimal("102"), Decimal("99"), Decimal("101"), 10000, datetime(2026, 3, 17, 14, 30, 0, tzinfo=UTC)),
+        BarLike("AAPL", Decimal("101"), Decimal("101.5"), Decimal("97"), Decimal("97.5"), 10000, datetime(2026, 3, 17, 14, 31, 0, tzinfo=UTC)),
     ]
     sig_uuid = uuid4()
     pos = ShadowPosition(
@@ -265,7 +270,7 @@ async def test_worker_closes_shadow_on_stop() -> None:
         symbol="AAPL",
         side="buy",
         qty=Decimal("100"),
-        entry_ts=datetime(2026, 3, 17, 14, 30, 0, tzinfo=timezone.utc),
+        entry_ts=datetime(2026, 3, 17, 14, 30, 0, tzinfo=UTC),
         ideal_entry_price=Decimal("101"),
         realistic_entry_price=Decimal("101"),
         stop_price=Decimal("99"),
@@ -312,15 +317,15 @@ async def test_worker_closes_shadow_on_target() -> None:
     sym_state.latest_last = Decimal("106")
     # Bar that hits target 105 (long: high >= target)
     sym_state.bars = [
-        BarLike("AAPL", Decimal("100"), Decimal("102"), Decimal("99"), Decimal("101"), 10000, datetime(2026, 3, 17, 14, 30, 0, tzinfo=timezone.utc)),
-        BarLike("AAPL", Decimal("101"), Decimal("106"), Decimal("100"), Decimal("105"), 10000, datetime(2026, 3, 17, 14, 31, 0, tzinfo=timezone.utc)),
+        BarLike("AAPL", Decimal("100"), Decimal("102"), Decimal("99"), Decimal("101"), 10000, datetime(2026, 3, 17, 14, 30, 0, tzinfo=UTC)),
+        BarLike("AAPL", Decimal("101"), Decimal("106"), Decimal("100"), Decimal("105"), 10000, datetime(2026, 3, 17, 14, 31, 0, tzinfo=UTC)),
     ]
     pos = ShadowPosition(
         signal_uuid=uuid4(),
         symbol="AAPL",
         side="buy",
         qty=Decimal("100"),
-        entry_ts=datetime(2026, 3, 17, 14, 30, 0, tzinfo=timezone.utc),
+        entry_ts=datetime(2026, 3, 17, 14, 30, 0, tzinfo=UTC),
         ideal_entry_price=Decimal("101"),
         realistic_entry_price=Decimal("101"),
         stop_price=Decimal("99"),

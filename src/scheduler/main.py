@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis.asyncio as redis
 
@@ -27,7 +27,7 @@ def _is_reset_time_et() -> bool:
     try:
         import zoneinfo
         et = zoneinfo.ZoneInfo("America/New_York")
-        now = datetime.now(timezone.utc).astimezone(et)
+        now = datetime.now(UTC).astimezone(et)
         return now.hour == RESET_HOUR_ET and now.minute == RESET_MINUTE_ET
     except Exception:
         return False
@@ -40,7 +40,7 @@ async def run_scheduler() -> None:
 
     while True:
         try:
-            now_et = datetime.now(timezone.utc)
+            now_et = datetime.now(UTC)
             try:
                 import zoneinfo
                 now_et = now_et.astimezone(zoneinfo.ZoneInfo("America/New_York"))

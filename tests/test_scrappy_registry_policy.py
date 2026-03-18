@@ -1,8 +1,12 @@
 """Tests for Scrappy source registry and source policy."""
 from __future__ import annotations
 
-import pytest
-
+from stockbot.scrappy.source_policy import (
+    apply_policy_for_candidate,
+    get_content_mode_for_candidate,
+    list_domains_by_content_mode,
+    policy_blocked_fn,
+)
 from stockbot.scrappy.source_registry import (
     REASON_ALLOWED_METADATA_ONLY,
     REASON_BLOCKED_DOMAIN,
@@ -12,12 +16,6 @@ from stockbot.scrappy.source_registry import (
     is_blocked,
     is_open_text,
     load_source_registry,
-)
-from stockbot.scrappy.source_policy import (
-    apply_policy_for_candidate,
-    get_content_mode_for_candidate,
-    list_domains_by_content_mode,
-    policy_blocked_fn,
 )
 
 

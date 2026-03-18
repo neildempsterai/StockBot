@@ -1,7 +1,7 @@
 """Build symbol-scoped intelligence snapshots from Scrappy notes. Deterministic scoring; no trade instructions."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from stockbot.scrappy.types import (
@@ -44,7 +44,7 @@ def build_snapshot_from_notes(
     Deterministic: aggregate sentiment, set stale/conflict flags, preserve evidence refs.
     Safe default when notes is empty.
     """
-    ts = snapshot_ts or datetime.now(timezone.utc)
+    ts = snapshot_ts or datetime.now(UTC)
     if not notes:
         return SymbolIntelligenceSnapshot(
             snapshot_id=None,

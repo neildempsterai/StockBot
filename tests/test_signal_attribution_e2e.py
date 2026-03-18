@@ -5,7 +5,7 @@ Verifies signals_with_scrappy_snapshot and linked snapshot on signal detail.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -18,15 +18,16 @@ from stockbot.ledger.events import SignalEvent
 from stockbot.ledger.store import LedgerStore
 from stockbot.scrappy.store import insert_intelligence_snapshot
 
-
 pytestmark = pytest.mark.asyncio
 
 
 def _db_reachable() -> bool:
     try:
         import asyncio
-        from stockbot.db.session import get_session_factory
+
         from sqlalchemy import text
+
+        from stockbot.db.session import get_session_factory
         async def _check():
             factory = get_session_factory()
             async with factory() as session:
@@ -57,7 +58,7 @@ async def test_signal_with_snapshot_shows_in_metrics(requires_db, client: TestCl
     snap_id = None
     async with factory() as session:
         snap_id = await insert_intelligence_snapshot(
-            session, "ATTRIB", datetime.now(timezone.utc), 30,
+            session, "ATTRIB", datetime.now(UTC), 30,
             "positive", 50, sentiment_label="positive",
             evidence_count=1, source_count=1,
         )
@@ -72,8 +73,8 @@ async def test_signal_with_snapshot_shows_in_metrics(requires_db, client: TestCl
             strategy_id="INTRA_EVENT_MOMO",
             strategy_version="0.1.0",
             feed="iex",
-            quote_ts=datetime.now(timezone.utc),
-            ingest_ts=datetime.now(timezone.utc),
+            quote_ts=datetime.now(UTC),
+            ingest_ts=datetime.now(UTC),
             bid=Decimal("200"),
             ask=Decimal("200.5"),
             last=Decimal("200"),

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import feedparser
@@ -20,7 +20,7 @@ def _parse_date(entry: Any) -> datetime | None:
         val = getattr(entry, key, None)
         if val and isinstance(val, time.struct_time):
             try:
-                return datetime(*val[:6], tzinfo=timezone.utc)
+                return datetime(*val[:6], tzinfo=UTC)
             except Exception:
                 pass
     return None

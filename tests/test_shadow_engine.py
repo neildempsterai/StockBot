@@ -1,20 +1,17 @@
 """Shadow engine: ideal/realistic fill math, exit precedence."""
 from __future__ import annotations
 
+from datetime import UTC
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
-
 from stockbot.shadow.engine import (
-    ShadowFillParams,
     ShadowPosition,
-    ideal_entry_price,
-    realistic_entry_price,
-    ideal_exit_price,
-    realistic_exit_price,
-    resolve_exit_conservative,
     close_shadow_position,
+    ideal_entry_price,
+    ideal_exit_price,
+    realistic_entry_price,
+    resolve_exit_conservative,
 )
 
 
@@ -65,13 +62,13 @@ def test_conservative_intrabar_stop_before_target_short() -> None:
 
 
 def test_close_shadow_position_returns_two_records() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
     pos = ShadowPosition(
         signal_uuid=uuid4(),
         symbol="AAPL",
         side="buy",
         qty=Decimal("100"),
-        entry_ts=datetime.now(timezone.utc),
+        entry_ts=datetime.now(UTC),
         ideal_entry_price=Decimal("100"),
         realistic_entry_price=Decimal("100.05"),
         stop_price=Decimal("98"),
@@ -79,7 +76,7 @@ def test_close_shadow_position_returns_two_records() -> None:
         slippage_bps=5,
         fee_per_share=Decimal("0"),
     )
-    exit_ts = datetime.now(timezone.utc)
+    exit_ts = datetime.now(UTC)
     records = close_shadow_position(pos, exit_ts, Decimal("104"), Decimal("103.95"), "target")
     assert len(records) == 2
     modes = {r["execution_mode"] for r in records}

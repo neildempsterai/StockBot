@@ -1,16 +1,12 @@
 """Deterministic news classification for INTRA_EVENT_MOMO."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 from stockbot.strategies.intra_event_momo import (
     NewsItem,
     classify_news_side,
     news_keyword_hits,
-    POSITIVE_KEYWORDS,
-    NEGATIVE_KEYWORDS,
 )
 
 
@@ -19,7 +15,7 @@ def test_positive_news_tagging() -> None:
         NewsItem(
             headline="Company beats earnings expectations",
             summary="Raised guidance for the year",
-            published_at=datetime.now(timezone.utc),
+            published_at=datetime.now(UTC),
             symbol="AAPL",
             raw={},
         )
@@ -32,7 +28,7 @@ def test_negative_news_tagging() -> None:
         NewsItem(
             headline="Company misses revenue targets",
             summary="Downgrade by analyst",
-            published_at=datetime.now(timezone.utc),
+            published_at=datetime.now(UTC),
             symbol="AAPL",
             raw={},
         )
@@ -45,7 +41,7 @@ def test_neutral_conflicting_news_tagging() -> None:
         NewsItem(
             headline="Company beats earnings",
             summary="But faces lawsuit and delay",
-            published_at=datetime.now(timezone.utc),
+            published_at=datetime.now(UTC),
             symbol="AAPL",
             raw={},
         )

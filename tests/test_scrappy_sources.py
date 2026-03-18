@@ -1,8 +1,6 @@
 """Tests for Scrappy source config loading (market-intel)."""
 from __future__ import annotations
 
-import pytest
-
 from stockbot.scrappy.sources import (
     get_search_config,
     invalidate_cache,

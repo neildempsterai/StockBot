@@ -2,6 +2,21 @@
 
 A release candidate must satisfy all items below before merge/release. No exceptions without a Decision Log entry.
 
+## Single release gate command
+
+From repo root, with Postgres and Redis running (e.g. `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis`):
+
+```bash
+export DATABASE_URL=postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD:-stockbot}@localhost:5432/stockbot
+export REDIS_URL=redis://localhost:6379/0
+# Optional: POSTGRES_PASSWORD if not using default
+make release-gate
+```
+
+This runs, in order: migrations, DB-backed tests, replay session_001 vs golden, and writes a report to `artifacts/release_gate/`. Exit 0 = pass; exit 1 = first failure. To include UM790 smoke: `make release-gate-um790` (requires docker context `um790` and Alpaca keys).
+
+**Required env**: `DATABASE_URL` (Postgres, async), `REDIS_URL`. Alpaca keys can be dummy for replay.
+
 ## Minimum pass criteria
 
 - [ ] **Migrations apply cleanly**  
@@ -9,14 +24,14 @@ A release candidate must satisfy all items below before merge/release. No except
 
 - [ ] **DB-backed tests pass**  
   With `DATABASE_URL` (Postgres) and `REDIS_URL` set:  
-  `pytest tests -v -k "e2e or replay or worker_scrappy or signal_attribution"` (or `make test-db`) passes.
+  `make test-db` or `make test-scrappy-db` and `make test-replay` (or full `make release-gate`).
 
 - [ ] **Replay session_001 matches golden outputs**  
-  `python scripts/run_replay.py --session replay/session_001` (or `make replay`) exits 0.  
+  `make replay` exits 0.  
   Outputs compared: signal_count, signal_symbols, signal_sides, rejection_counts_by_reason, shadow_trade_count, shadow_trade_symbols, accepted_with_snapshot_count, accepted_without_snapshot_count, attribution_summary, metrics_summary_subset, replay_version.
 
 - [ ] **Smoke (UM790) passes**  
-  After deploy: `./scripts/smoke_um790.sh` (or `make smoke-um790`) exits 0.  
+  After deploy: `make smoke-um790` exits 0.  
   /health, /v1/intelligence/summary, /v1/metrics/summary return 200.
 
 - [ ] **Attribution summary shape is stable**  
@@ -27,9 +42,15 @@ A release candidate must satisfy all items below before merge/release. No except
 
 ## Optional pre-release
 
-- Run `ruff check src tests scripts && mypy src`.
+- Run `make lint` (ruff + mypy).
 - Run full `pytest tests -v`.
 - Run `scripts/replay_diff.py expected_outputs.json actual.json` after any intentional strategy change to review diff before accepting new golden outputs.
+
+## Report artifacts
+
+- **Path**: `artifacts/release_gate/` (gitignored).
+- **Contents**: `report_YYYYMMDD_HHMMSS.json` and `report_YYYYMMDD_HHMMSS.md` with git commit, migration status, DB test result, replay result, smoke status, timestamp, and overall pass/fail.
+- **What blocks release**: Any step failing (migrations, DB tests, replay, or smoke when run) or `release_gate_pass: false` in the JSON report.
 
 ## Changing golden outputs
 

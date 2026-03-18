@@ -1,10 +1,10 @@
 """Internal admin UI. Access via SSH tunnel only (e.g. ssh -L 8080:localhost:8080 user@um790)."""
 import os
+
+import httpx
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
-import httpx
-
 
 API_BASE = os.environ.get("STOCKBOT_API_BASE", "http://localhost:8000")
 

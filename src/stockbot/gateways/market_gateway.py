@@ -23,7 +23,7 @@ REDIS_STREAM_NEWS = "alpaca:market:news"
 
 async def fan_out_handler(redis_client: redis.Redis, msg_type: str, payload: dict) -> None:
     """Push to Redis streams for downstream consumers."""
-    ts = datetime.now(datetime.UTC).isoformat()
+    ts = datetime.now(timezone.UTC).isoformat()
     body = {"type": msg_type, "payload": _serialize_payload(payload), "ingest_ts": ts}
     if msg_type == "trade":
         await redis_client.xadd(REDIS_STREAM_TRADES, {"data": json.dumps(body)}, maxlen=10000)
@@ -41,7 +41,7 @@ def _serialize_payload(payload: dict) -> dict:
     for k, v in payload.items():
         if v is None:
             out[k] = None
-        elif hasattr(v, "isoformat") and callable(getattr(v, "isoformat")):
+        elif hasattr(v, "isoformat") and callable(v.isoformat):
             out[k] = v.isoformat()
         elif hasattr(v, "__float__") and not isinstance(v, (int, float, bool)):
             try:
@@ -92,7 +92,7 @@ async def run_market_gateway() -> None:
     while True:
         try:
             await stream.run()
-        except Exception as e:
+        except Exception:
             # Reconnect: reseed then loop again
             await reseed_from_snapshots(stream, symbols)
             await asyncio.sleep(5)

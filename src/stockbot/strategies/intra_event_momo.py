@@ -5,7 +5,7 @@ Deterministic features, news tagging, entry/exit rules, reason codes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -63,7 +63,7 @@ def classify_news_side(news_items: list[NewsItem], within_minutes: int = 60) -> 
     Returns: 'long' | 'short' | 'neutral'
     """
     from datetime import timedelta
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=within_minutes)
+    cutoff = datetime.now(UTC) - timedelta(minutes=within_minutes)
     positive_hits = 0
     negative_hits = 0
     for n in news_items:

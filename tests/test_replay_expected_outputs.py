@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_001 = REPO_ROOT / "replay" / "session_001"
 
@@ -49,7 +47,7 @@ def test_bars_jsonl_format():
     path = SESSION_001 / "bars.jsonl"
     assert path.exists()
     with path.open() as f:
-        for i, line in enumerate(f):
+        for _i, line in enumerate(f):
             line = line.strip()
             if not line:
                 continue

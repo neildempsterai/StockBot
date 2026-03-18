@@ -1,7 +1,7 @@
 """Tests for Scrappy intelligence snapshot: build from notes, stale/conflict flags."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from stockbot.scrappy.snapshot import build_snapshot_from_notes
@@ -19,7 +19,7 @@ def _note(sentiment: str, source_name: str = "test", title: str = ""):
     n.source_name = source_name
     n.title = title
     n.source_url = "https://example.com/1"
-    n.created_at = datetime.now(timezone.utc)
+    n.created_at = datetime.now(UTC)
     return n
 
 
@@ -56,7 +56,7 @@ def test_build_snapshot_conflict_flag():
 
 
 def test_build_snapshot_stale_flag():
-    old = datetime.now(timezone.utc) - timedelta(minutes=200)
+    old = datetime.now(UTC) - timedelta(minutes=200)
     notes = [_note("neutral")]
     notes[0].created_at = old
     snap = build_snapshot_from_notes("QQQ", notes, stale_minutes=120)

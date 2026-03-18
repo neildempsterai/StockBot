@@ -7,7 +7,6 @@ from stockbot.scrappy.notes import (
     _parse_and_validate_note_draft_json,
     build_note_from_candidate,
     dedup_hash_from_candidate,
-    draft_note_with_llm,
     extract_symbols_from_text,
     validate_note_payload,
 )

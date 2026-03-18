@@ -1,12 +1,9 @@
 """Alpaca REST client: snapshot, orders, feed=iex."""
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from stockbot.alpaca.client import AlpacaClient
-from stockbot.alpaca.types import Snapshot
 
 
 def test_get_snapshot_uses_feed_param() -> None:

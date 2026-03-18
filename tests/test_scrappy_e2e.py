@@ -7,13 +7,12 @@ from __future__ import annotations
 import os
 
 import pytest
+from sqlalchemy import func, select
 
+from stockbot.db.models import MarketIntelNote
 from stockbot.db.session import get_session_factory
 from stockbot.scrappy.run_service import run_scrappy
-from stockbot.scrappy.store import count_notes, get_recent_runs
-from sqlalchemy import select, func
-from stockbot.db.models import MarketIntelNote
-
+from stockbot.scrappy.store import count_notes
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,7 +56,7 @@ async def test_run_then_repeat_run_no_duplicate_notes(db_available) -> None:
 async def test_idempotent_note_insert_by_dedup_hash(db_available) -> None:
     """Inserting a note with same dedup_hash twice returns same note_id and does not create duplicate row."""
     from stockbot.scrappy.notes import build_note_from_candidate, validate_note_payload
-    from stockbot.scrappy.store import insert_market_intel_note, get_note_by_dedup_hash
+    from stockbot.scrappy.store import insert_market_intel_note
 
     candidate = {
         "url": "https://example.com/e2e-test-article",

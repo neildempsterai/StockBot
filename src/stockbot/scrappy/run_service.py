@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from stockbot.db.session import get_session_factory
 from stockbot.scrappy.dedup import normalize_url, url_hash
@@ -15,8 +15,8 @@ from stockbot.scrappy.notes import (
     draft_note_with_llm,
     validate_note_payload,
 )
-from stockbot.scrappy.source_policy import apply_policy_for_candidate, policy_blocked_fn
 from stockbot.scrappy.snapshot import build_snapshot_from_notes
+from stockbot.scrappy.source_policy import apply_policy_for_candidate
 from stockbot.scrappy.store import (
     count_notes,
     create_scrappy_run,
@@ -366,7 +366,7 @@ async def get_notes_recent(
     """Return recent market_intel_notes as dicts with optional filters. Empty when DB unavailable."""
     since = None
     if since_hours is not None and since_hours > 0:
-        since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        since = datetime.now(UTC) - timedelta(hours=since_hours)
     try:
         factory = get_session_factory()
         async with factory() as session:

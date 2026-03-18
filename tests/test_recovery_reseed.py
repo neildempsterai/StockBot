@@ -1,14 +1,15 @@
 """Recovery: reseed from snapshots/latest then resume without duplicating bars/quotes."""
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from stockbot.alpaca.client import AlpacaClient
 from stockbot.alpaca.stream_client import StreamClient
-from stockbot.gateways.market_gateway import reseed_from_snapshots
 from stockbot.alpaca.types import Quote, Trade
+from stockbot.gateways.market_gateway import reseed_from_snapshots
 
 
 @pytest.mark.asyncio
@@ -32,7 +33,7 @@ async def test_reseed_from_snapshots_dispatches_quote_and_trade() -> None:
         patch("stockbot.config.get_settings") as mock_settings,
         patch.object(AlpacaClient, "get_snapshots") as get_snapshots,
     ):
-        from datetime import datetime, timezone
+        from datetime import datetime
         from decimal import Decimal
         mock_settings.return_value = MagicMock(
             alpaca_api_key_id="k",
@@ -44,8 +45,8 @@ async def test_reseed_from_snapshots_dispatches_quote_and_trade() -> None:
         )
         get_snapshots.return_value = {
             "AAPL": MagicMock(
-                latest_quote=Quote("AAPL", Decimal("1"), Decimal("2"), Decimal("1"), Decimal("1"), datetime.now(timezone.utc), "iex"),
-                latest_trade=Trade("AAPL", Decimal("1.5"), Decimal("100"), datetime.now(timezone.utc), "iex"),
+                latest_quote=Quote("AAPL", Decimal("1"), Decimal("2"), Decimal("1"), Decimal("1"), datetime.now(UTC), "iex"),
+                latest_trade=Trade("AAPL", Decimal("1.5"), Decimal("100"), datetime.now(UTC), "iex"),
             ),
         }
         await reseed_from_snapshots(stream, ["AAPL"])

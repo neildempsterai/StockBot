@@ -1,12 +1,9 @@
 """Pytest fixtures. Use env or overrides for Alpaca/Redis/DB in tests."""
 from __future__ import annotations
 
-import os
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from pydantic_settings import BaseSettings
 
 
 @pytest.fixture

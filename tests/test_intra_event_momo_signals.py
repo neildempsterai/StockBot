@@ -1,20 +1,12 @@
 """INTRA_EVENT_MOMO signal generation and filters."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-
-import pytest
 
 from stockbot.strategies.intra_event_momo import (
     FeatureSet,
     evaluate,
-    MIN_PRICE,
-    MAX_PRICE,
-    MIN_DOLLAR_VOLUME_1M,
-    MAX_SPREAD_BPS,
-    MIN_ABS_GAP_PCT,
-    MIN_REL_VOLUME_5M,
 )
 
 
@@ -34,7 +26,7 @@ def _features(
     vwap = Decimal("147")
     return FeatureSet(
         symbol=symbol,
-        ts=datetime(2026, 3, 17, 14, 35, 0, tzinfo=timezone.utc),
+        ts=datetime(2026, 3, 17, 14, 35, 0, tzinfo=UTC),
         prev_close=Decimal("145"),
         gap_pct_from_prev_close=gap_pct,
         spread_bps=spread_bps,
@@ -65,7 +57,7 @@ def test_short_signal_generation() -> None:
     vwap = Decimal("151")
     f = FeatureSet(
         symbol="AAPL",
-        ts=datetime(2026, 3, 17, 14, 35, 0, tzinfo=timezone.utc),
+        ts=datetime(2026, 3, 17, 14, 35, 0, tzinfo=UTC),
         prev_close=Decimal("155"),
         gap_pct_from_prev_close=Decimal("-1.5"),
         spread_bps=10,

@@ -1,12 +1,13 @@
 """One-connection fan-out: only one Alpaca market-data connection; downstream receives events."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC
+from unittest.mock import AsyncMock
 
 import pytest
 
 from stockbot.alpaca.stream_client import StreamClient
-from stockbot.gateways.market_gateway import fan_out_handler, _serialize_payload
+from stockbot.gateways.market_gateway import _serialize_payload, fan_out_handler
 
 
 @pytest.mark.asyncio
@@ -25,7 +26,7 @@ async def test_fan_out_handler_pushes_to_redis_streams() -> None:
 @pytest.mark.asyncio
 async def test_serialize_payload_handles_dataclass() -> None:
     """Payload with dataclass (e.g. Quote) is JSON-serializable."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from decimal import Decimal
 
     from stockbot.alpaca.types import Quote
@@ -36,7 +37,7 @@ async def test_serialize_payload_handles_dataclass() -> None:
         ask_price=Decimal("150.05"),
         bid_size=Decimal("100"),
         ask_size=Decimal("100"),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         feed="iex",
     )
     out = _serialize_payload({"quote": q})

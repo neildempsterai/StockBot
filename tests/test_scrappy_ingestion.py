@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from stockbot.scrappy.ingestion import fetch_feed
 from stockbot.scrappy.sources import invalidate_cache, load_scrappy_sources
 

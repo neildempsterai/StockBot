@@ -1,11 +1,9 @@
 """BOD reconciliation: internal ledger stays stable when Alpaca position averages change."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
-from datetime import datetime, timezone
-
-import pytest
 
 from stockbot.ledger.events import FillEvent
 
@@ -22,8 +20,8 @@ def test_fill_event_canonical_avg_fill_price() -> None:
         avg_fill_price=Decimal("150.00"),
         alpaca_avg_entry_price=Decimal("150.00"),
         feed="iex",
-        quote_ts=datetime.now(timezone.utc),
-        ingest_ts=datetime.now(timezone.utc),
+        quote_ts=datetime.now(UTC),
+        ingest_ts=datetime.now(UTC),
         bid=None,
         ask=None,
         last=None,

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 

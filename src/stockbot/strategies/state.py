@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
 from stockbot.strategies.intra_event_momo import NewsItem
 

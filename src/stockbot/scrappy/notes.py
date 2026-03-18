@@ -5,15 +5,12 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from stockbot.scrappy.dedup import normalize_url
 from stockbot.scrappy.schema import (
-    CATALYST_TYPES,
-    IMPACT_HORIZON,
-    SENTIMENT_LABELS,
     is_valid_catalyst_type,
     is_valid_impact_horizon,
     is_valid_sentiment_label,
@@ -175,7 +172,7 @@ def draft_note_with_llm(payload: dict[str, Any], max_summary_chars: int = 5000) 
     Never insert notes that violate schema; invalid LLM output does not alter required fields.
     """
     try:
-        from stockbot.scrappy.llm.router import get_route, call
+        from stockbot.scrappy.llm.router import call, get_route
     except ImportError:
         return payload
     if get_route("structured_note_draft") is None:
