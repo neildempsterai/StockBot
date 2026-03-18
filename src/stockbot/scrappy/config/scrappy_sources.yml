@@ -1,0 +1,100 @@
+# Scrappy market-intel sources — Lane A (official) + Lane B (media).
+# source_type: official | media
+# transport: rss | rss_or_api | search
+# trust_tier: high (official) | medium (curated media)
+# focus_tags: catalyst/theme tags this source applies to
+
+sources:
+  - name: sec_edgar_xbrl
+    source_type: official
+    transport: rss
+    enabled: true
+    url: "https://www.sec.gov/Archives/edgar/xbrlrss.all.xml"
+    focus_tags: [filings, sec_filing, 8-k, 10-q, 10-k, insider_activity]
+    trust_tier: high
+
+  - name: fed_releases
+    source_type: official
+    transport: rss
+    enabled: true
+    url: "https://www.federalreserve.gov/feeds/press_all.xml"
+    focus_tags: [macro_rates, macro_inflation, macro_labor, regulation]
+    trust_tier: high
+
+  - name: bls_releases
+    source_type: official
+    transport: rss
+    enabled: true
+    url: "https://www.bls.gov/feed/bls_latest.rss"
+    focus_tags: [macro_labor, macro_inflation]
+    trust_tier: high
+
+  - name: yahoo_finance_rss
+    source_type: media
+    transport: rss
+    enabled: true
+    url: "https://finance.yahoo.com/news/rssindex"
+    focus_tags: []
+    trust_tier: medium
+
+  - name: benzinga_rss
+    source_type: media
+    transport: rss
+    enabled: true
+    url: "https://www.benzinga.com/feed"
+    focus_tags: []
+    trust_tier: medium
+
+  # Optional: add more when URLs are verified
+  # - name: bis_updates
+  #   source_type: official
+  #   transport: rss
+  #   enabled: false
+  #   url: "TODO verify BIS RSS URL"
+  #   focus_tags: [macro_rates, macro_liquidity, banking]
+  #   trust_tier: high
+  # - name: dol_releases
+  #   source_type: official
+  #   transport: rss
+  #   enabled: false
+  #   url: "TODO verify DOL RSS URL"
+  #   focus_tags: [macro_labor]
+  #   trust_tier: high
+
+search:
+  enabled_for_low_confidence: true
+  confidence_threshold: 0.65
+  max_queries_per_sprint: 6
+  max_results_per_query: 8
+  preferred_domains:
+    - reuters.com
+    - cnbc.com
+    - marketwatch.com
+    - finance.yahoo.com
+    - bloomberg.com
+    - seekingalpha.com
+    - investing.com
+    - benzinga.com
+  query_templates:
+    - "{symbol} earnings guidance analyst upgrade downgrade SEC filing"
+    - "{symbol} merger litigation regulation buyback insider"
+    - "{sector} sector news regulation outlook"
+    - "{theme} macro rates inflation jobs oil geopolitics"
+
+watchlist_rules:
+  prioritize_watchlist_symbols: true
+  prioritize_positions: true
+  allow_macro_theme_runs: true
+  max_symbols_per_run: 10
+
+dedup:
+  recrawl_days: 2
+  min_candidates_to_proceed: 1
+  junk_domains: []
+  canonicalize_urls: true
+
+extraction:
+  max_evidence_snippets: 8
+  max_symbols_per_note: 8
+  sentiment_scale: "-1_to_1"
+  require_source_url: true

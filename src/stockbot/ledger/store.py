@@ -1,12 +1,14 @@
 """Persist fills/signals with feed provenance. Internal ledger is canonical."""
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stockbot.db.models import Fill, Signal
+from stockbot.db.models import Fill, ShadowTrade, Signal
 from stockbot.ledger.events import FillEvent, SignalEvent
 
 
@@ -32,9 +34,67 @@ class LedgerStore:
             last=event.last,
             spread_bps=event.spread_bps,
             latency_ms=event.latency_ms,
+            reason_codes=event.reason_codes,
+            feature_snapshot_json=event.feature_snapshot_json,
+            quote_snapshot_json=event.quote_snapshot_json,
+            news_snapshot_json=event.news_snapshot_json,
         )
         self._session.add(row)
         await self._session.commit()
+
+    async def insert_shadow_trade(
+        self,
+        signal_uuid: UUID,
+        execution_mode: str,
+        entry_ts: datetime,
+        exit_ts: datetime,
+        entry_price: Decimal,
+        exit_price: Decimal,
+        stop_price: Decimal,
+        target_price: Decimal,
+        exit_reason: str,
+        qty: Decimal,
+        gross_pnl: Decimal,
+        net_pnl: Decimal,
+        slippage_bps: int = 0,
+        fee_per_share: Decimal = Decimal("0"),
+    ) -> None:
+        row = ShadowTrade(
+            signal_uuid=signal_uuid,
+            execution_mode=execution_mode,
+            entry_ts=entry_ts,
+            exit_ts=exit_ts,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            exit_reason=exit_reason,
+            qty=qty,
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            slippage_bps=slippage_bps,
+            fee_per_share=fee_per_share,
+        )
+        self._session.add(row)
+        await self._session.commit()
+
+    async def get_signal_by_uuid(self, signal_uuid: UUID) -> Signal | None:
+        result = await self._session.execute(
+            select(Signal).where(Signal.signal_uuid == signal_uuid).limit(1)
+        )
+        return result.scalars().first()
+
+    async def get_signals(self, limit: int = 100) -> list[Signal]:
+        result = await self._session.execute(
+            select(Signal).order_by(Signal.created_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_shadow_trades(self, limit: int = 100) -> list[ShadowTrade]:
+        result = await self._session.execute(
+            select(ShadowTrade).order_by(ShadowTrade.created_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def insert_fill(self, event: FillEvent) -> None:
         row = Fill(

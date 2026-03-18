@@ -23,6 +23,10 @@ class SignalEvent:
     last: Decimal | None
     spread_bps: int | None
     latency_ms: int | None
+    reason_codes: list[str] | None = None
+    feature_snapshot_json: dict | None = None
+    quote_snapshot_json: dict | None = None
+    news_snapshot_json: dict | None = None
 
 
 @dataclass

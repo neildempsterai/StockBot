@@ -46,3 +46,12 @@ Internal ledger stays stable even when Alpaca's position average fields change a
 Tailnet policy only allows your user to SSH to the UM790. Tailscale's access-control model is deny-by-default and policy-driven.
 
 - **Manual**: Configure in Tailscale admin (ACLs / SSH). Document in OPS_RUNBOOK_TAILSCALE_SSH.md.
+
+## INTRA_EVENT_MOMO strategy tests
+
+- **News classification**: `tests/test_intra_event_momo_news.py` — positive/negative/neutral keyword tagging.
+- **Signal generation**: `tests/test_intra_event_momo_signals.py` — long/short signal, reject spread/news/gap.
+- **Shadow engine**: `tests/test_shadow_engine.py` — ideal/realistic fill math, conservative intrabar stop-vs-target.
+- **API**: `tests/test_api_strategies.py` — GET /health, /v1/strategies, /v1/signals, /v1/signals/{uuid}, /v1/shadow/trades, /v1/metrics/summary.
+- **Scheduler day reset**: Manual or integration — TRADED_TODAY_KEY cleared at session boundary (04:00 ET).
+- **One trade per symbol per day**: Worker uses Redis set `stockbot:strategies:intra_event_momo:traded_today`; scheduler clears daily.

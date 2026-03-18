@@ -106,6 +106,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:?}
       ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY:?}
+      STOCKBOT_UNIVERSE: ${STOCKBOT_UNIVERSE:-AAPL,AMD,AMZN,META,MSFT,NVDA,QQQ,SPY,TSLA}
+      SHADOW_SLIPPAGE_BPS: ${SHADOW_SLIPPAGE_BPS:-5}
+      SHADOW_FEE_PER_SHARE: ${SHADOW_FEE_PER_SHARE:-0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -132,8 +135,13 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.ui
+    environment:
+      STOCKBOT_API_BASE: http://api:8000
     ports:
       - "127.0.0.1:8080:8080"
+    depends_on:
+      api:
+        condition: service_started
     restart: unless-stopped
 
 volumes:

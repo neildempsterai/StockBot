@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     # v0.1: regular hours only
     extended_hours_enabled: bool = Field(default=False, alias="EXTENDED_HOURS_ENABLED")
 
+    # INTRA_EVENT_MOMO strategy
+    stockbot_universe: str = Field(
+        default="AAPL,AMD,AMZN,META,MSFT,NVDA,QQQ,SPY,TSLA",
+        alias="STOCKBOT_UNIVERSE",
+    )
+    shadow_slippage_bps: int = Field(default=5, alias="SHADOW_SLIPPAGE_BPS")
+    shadow_fee_per_share: str = Field(default="0", alias="SHADOW_FEE_PER_SHARE")
+    entry_start_et: str = Field(default="09:35", alias="ENTRY_START_ET")
+    entry_end_et: str = Field(default="11:30", alias="ENTRY_END_ET")
+    force_flat_et: str = Field(default="15:45", alias="FORCE_FLAT_ET")
+
 
 def get_settings() -> Settings:
     return Settings()

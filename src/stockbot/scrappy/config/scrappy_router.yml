@@ -1,0 +1,30 @@
+# Scrappy model router — task-to-provider mapping. Market-intel tasks only.
+# Env overrides: SCRAPPY_ROUTER_<TASK>_PROVIDER, _MODEL, _TIMEOUT
+# Provider enable: SCRAPPY_ROUTER_OLLAMA_ENABLED=1, SCRAPPY_ROUTER_OPENROUTER_ENABLED=1, etc.
+
+tasks:
+  triage:
+    provider: ollama
+    model: fast
+    timeout_s: 30
+    allow_cloud_long_context: false
+  structured_note_draft:
+    provider: ollama
+    model: reasoning
+    timeout_s: 90
+    allow_cloud_long_context: false
+  whole_doc_read:
+    provider: openrouter
+    model: long_context
+    timeout_s: 90
+    allow_cloud_long_context: true
+  semantic_validation:
+    provider: ollama
+    model: fast
+    timeout_s: 45
+    allow_cloud_long_context: false
+  arbitration:
+    provider: openrouter
+    model: long_context
+    timeout_s: 90
+    allow_cloud_long_context: true
