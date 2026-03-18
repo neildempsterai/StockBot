@@ -49,12 +49,19 @@ pytest tests/test_scrappy_*.py tests/test_worker_scrappy_e2e.py tests/test_api_i
 # Deterministic replay (same env; release gate)
 make replay
 # Or: PYTHONPATH=.:src python scripts/run_replay.py --session replay/session_001
-# To refresh golden outputs after an intentional change: run with --output actual.json, review diff, then copy to expected_outputs.json and document in DECISION_LOG.md.
+# Replay requires clean validation DB (signals, shadow_trades, scrappy_gate_rejections, symbol_intelligence_snapshots empty).
+# Release gate runs scripts/reset_validation_state.py before DB tests and before replay. For ad-hoc replay after other tests:
+#   python scripts/run_replay.py --reset-state --session replay/session_001
+# Or override: --allow-dirty (not deterministic). To refresh golden: --output actual.json, review diff, copy to expected_outputs.json, document in DECISION_LOG.md.
 # Compare two outputs: python scripts/replay_diff.py actual.json expected_outputs.json
 
 # Release gate — Docker-native (preferred; no host venv)
 make release-gate-docker
-# Starts postgres + redis if needed, runs migrations + DB tests + replay inside validate container, writes report to artifacts/release_gate/. Requires: Docker, POSTGRES_PASSWORD (default stockbot), optional ALPACA keys (dummy OK).
+# Starts postgres + redis if needed, runs migrations, resets validation state (signals/shadow_trades/scrappy_gate_rejections/symbol_intelligence_snapshots), DB tests, reset again, replay inside validate container, writes report to artifacts/release_gate/. Requires: Docker, POSTGRES_PASSWORD (default stockbot), optional ALPACA keys (dummy OK). Isolated state per run so replay is deterministic.
+
+# If buildx has permission issues: use classic docker build (no buildx)
+make release-gate-docker-classic
+# Builds validate image with `docker build`, then runs the gate in that container on the same network as postgres/redis.
 
 # Release gate — local (requires venv + Postgres + Redis)
 docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis

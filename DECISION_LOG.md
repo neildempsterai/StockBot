@@ -114,3 +114,19 @@ Decision:
 Consequences:
 - Next work is validation containerization, test-environment unification, and core-path cleanup.
 - New feature work remains frozen until the release gate runs in one command without host Python setup.
+
+## 2026-03-18 — Release gate must run against isolated state
+Status: Accepted
+
+Context:
+- Docker-native release gate now runs.
+- Remaining failure is caused by replay/test assumptions running against shared Postgres state from earlier runs.
+
+Decision:
+- Release-gate and replay validation must use isolated DB state per run.
+- Tests must not depend on pre-existing signals, trades, or intelligence rows.
+- Do not weaken deterministic replay assertions to tolerate shared-state contamination.
+
+Consequences:
+- Next implementation is per-run DB isolation or reset for validation.
+- Replay outputs become trustworthy release artifacts.

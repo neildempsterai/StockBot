@@ -2,7 +2,7 @@
 # Replay: use DATABASE_URL + REDIS_URL (Postgres + Redis). make replay runs session_001 and compares to golden.
 # For docker compose config: POSTGRES_PASSWORD=... ALPACA_API_KEY_ID=... ALPACA_API_SECRET_KEY=... make compose-config
 
-.PHONY: lint test compose-config replay replay-diff test-db test-replay test-scrappy-db smoke-um790 release-gate release-gate-um790 release-gate-docker validate-docker
+.PHONY: lint test compose-config replay replay-diff test-db test-replay test-scrappy-db smoke-um790 release-gate release-gate-um790 release-gate-docker release-gate-docker-classic validate-docker
 
 lint:
 	docker run --rm -v "$(CURDIR):/app" -w /app python:3.11-slim bash -c "pip install -q ruff mypy '.[dev]' && ruff check src tests scripts --fix && ruff format src tests scripts && mypy src"
@@ -38,6 +38,10 @@ release-gate-um790:
 # Docker-native: no host venv; runs migrations, DB tests, replay in validate container. Report in artifacts/release_gate/
 release-gate-docker:
 	./scripts/release_gate.sh --docker --start-infra
+
+# Same as release-gate-docker but use classic docker build (no buildx). Use if buildx has permission issues.
+release-gate-docker-classic:
+	./scripts/release_gate.sh --docker --docker-no-buildx --start-infra
 
 validate-docker:
 	docker compose -f infra/compose.yaml -f infra/compose.test.yaml run --rm -v "$(CURDIR):/app" -w /app validate

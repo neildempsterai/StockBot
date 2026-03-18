@@ -45,3 +45,7 @@
 - [ ] Remove SQLite fallback assumptions from API/worker validation tests
 - [ ] Clean lint/type issues in release-path files
 - [ ] Run first full Docker-native release gate on UM790 and store report artifact
+- [ ] Isolate release-gate DB state per run
+- [ ] Ensure replay/session_001 runs against empty signals/trades/rejections state
+- [ ] Add cleanup/reset step or per-run database naming for validation
+- [ ] Make test_replay_runner independent of prior gate runs

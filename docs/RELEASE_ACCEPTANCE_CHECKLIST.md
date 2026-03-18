@@ -12,12 +12,18 @@ make release-gate-docker
 
 This will:
 1. Start Postgres and Redis (if not already up) via `docker compose -f infra/compose.yaml -f infra/compose.test.yaml up -d postgres redis`.
-2. Run the full gate inside the `validate` container: migrations, DB-backed tests, replay session_001 vs golden.
+2. Run the full gate inside the `validate` container: migrations, **reset validation state** (truncate signals, shadow_trades, scrappy_gate_rejections, symbol_intelligence_snapshots), DB-backed tests, **reset again**, replay session_001 vs golden.
 3. Write report to `artifacts/release_gate/report_YYYYMMDD_HHMMSS.json` and `.md` on the host (repo is mounted into the container).
+
+**Isolated DB state**: The gate uses a single validation DB and runs `scripts/reset_validation_state.py` before DB tests and before replay so that replay and tests do not see leftover rows from previous runs. The script truncates (with RESTART IDENTITY CASCADE) the four tables above. Replay refuses to run against a non-empty validation state unless `--allow-dirty` is passed. For ad-hoc replay after other tests use `--reset-state` or run `scripts/reset_validation_state.py` first. Optional `KEEP_TEST_DB=1` is reserved for a future per-run DB naming mode (no effect today).
 
 **Required env**: `POSTGRES_PASSWORD` (default `stockbot`). Optional: `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` (dummy OK for replay).
 
 **Pass**: Exit 0. **Fail**: Exit non-zero at first failing step (migrations, tests, or replay).
+
+**Buildx-free fallback**: If Docker buildx has permission or availability issues, use `make release-gate-docker-classic`. This builds the validate image with classic `docker build` (no buildx), then runs the gate in that container. Same pass/fail and report location as above.
+
+**If full replay fails in Docker** (e.g. 0 signals vs expected 2): run the gate locally with `make release-gate` (venv + Postgres + Redis) to confirm replay passes; the worker subprocess in the container may need debugging (env, Redis connectivity, or timing).
 
 ## Local release gate (with venv)
 

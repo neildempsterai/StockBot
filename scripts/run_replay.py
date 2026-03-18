@@ -43,10 +43,27 @@ def _load_json(path: Path) -> dict:
         return json.load(f)
 
 
+async def _is_validation_db_dirty() -> tuple[bool, dict[str, int]]:
+    """Return (is_dirty, counts) for signals, shadow_trades, scrappy_gate_rejections, symbol_intelligence_snapshots."""
+    from sqlalchemy import text
+    from stockbot.db.session import get_session_factory
+
+    tables = ["signals", "shadow_trades", "scrappy_gate_rejections", "symbol_intelligence_snapshots"]
+    counts = {}
+    factory = get_session_factory()
+    async with factory() as session:
+        for t in tables:
+            r = await session.execute(text(f"SELECT COUNT(*) FROM {t}"))
+            counts[t] = r.scalar() or 0
+    is_dirty = any(c > 0 for c in counts.values())
+    return is_dirty, counts
+
+
 async def _run(
     session_dir: Path,
     worker_run_seconds: float = 25.0,
     skip_worker: bool = False,
+    allow_dirty: bool = False,
 ) -> tuple[dict, dict]:
     import redis.asyncio as redis
     from tests.helpers.replay import push_bar, push_news, push_quote, push_trade
@@ -54,6 +71,17 @@ async def _run(
     from stockbot.db.session import get_session_factory
     from stockbot.ledger.store import LedgerStore
     from stockbot.scrappy.store import get_gate_rejection_counts, insert_intelligence_snapshot
+
+    if not allow_dirty:
+        is_dirty, counts = await _is_validation_db_dirty()
+        if is_dirty:
+            print(
+                "Replay requires clean validation state. Current row counts: "
+                + ", ".join(f"{k}={v}" for k, v in counts.items()),
+                file=sys.stderr,
+            )
+            print("Run scripts/reset_validation_state.py or pass --allow-dirty to override.", file=sys.stderr)
+            sys.exit(1)
 
     metadata = _load_json(session_dir / "metadata.json")
     expected = _load_json(session_dir / "expected_outputs.json")
@@ -223,18 +251,45 @@ def main() -> int:
     parser.add_argument(
         "--skip-worker", action="store_true", help="Only load data, do not run worker"
     )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Run even if validation tables already have rows (not deterministic)",
+    )
+    parser.add_argument(
+        "--reset-state",
+        action="store_true",
+        help="Run reset_validation_state.py before replay",
+    )
     parser.add_argument("--output", help="Write actual output JSON to file")
     args = parser.parse_args()
     session_dir = REPO_ROOT / args.session
     if not session_dir.is_dir():
         print(f"Session dir not found: {session_dir}", file=sys.stderr)
         return 1
+    if args.reset_state:
+        r = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "reset_validation_state.py")],
+            cwd=str(REPO_ROOT),
+            env=os.environ,
+        )
+        if r.returncode != 0:
+            return r.returncode
     actual, expected = asyncio.run(
-        _run(session_dir, worker_run_seconds=args.seconds, skip_worker=args.skip_worker)
+        _run(
+            session_dir,
+            worker_run_seconds=args.seconds,
+            skip_worker=args.skip_worker,
+            allow_dirty=args.allow_dirty,
+        )
     )
     if args.output:
         with open(args.output, "w") as f:
             json.dump(actual, f, indent=2)
+    if args.skip_worker:
+        # Skip-worker run is for testing zero-signals; do not diff against full-run golden.
+        print("Replay OK (--skip-worker): output written, no diff vs expected_outputs.json")
+        return 0
     diffs = _diff(actual, expected)
     if diffs:
         print("Replay output mismatch:", file=sys.stderr)

@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_REPLAY = REPO_ROOT / "scripts" / "run_replay.py"
 REPLAY_DIFF = REPO_ROOT / "scripts" / "replay_diff.py"
+RESET_STATE = REPO_ROOT / "scripts" / "reset_validation_state.py"
 SESSION_001 = REPO_ROOT / "replay" / "session_001"
 EXPECTED = SESSION_001 / "expected_outputs.json"
 
@@ -73,8 +74,20 @@ def test_replay_diff_no_diff(tmp_path):
     assert r.returncode == 0
 
 
+def _run_reset_state():
+    subprocess.run(
+        [sys.executable, str(RESET_STATE)],
+        cwd=str(REPO_ROOT),
+        env=os.environ,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+
 def test_replay_runner_skip_worker_produces_zero_signals(requires_db_redis, tmp_path):
-    """With --skip-worker, replay loads data but no signals (runner still collects)."""
+    """With --skip-worker, replay loads data but no signals (runner still collects). Uses clean DB state."""
+    _run_reset_state()
     out_json = tmp_path / "actual.json"
     r = subprocess.run(
         [
@@ -93,3 +106,39 @@ def test_replay_runner_skip_worker_produces_zero_signals(requires_db_redis, tmp_
     assert out_json.exists()
     data = json.loads(out_json.read_text())
     assert data.get("signal_count") == 0
+
+
+def test_replay_fails_on_dirty_db_without_allow_dirty(requires_db_redis, tmp_path):
+    """Replay exits non-zero with clear message when validation tables have rows and --allow-dirty is not set."""
+    _run_reset_state()
+    # Create dirty state: run replay with --allow-dirty so snapshots (and no signals) remain
+    subprocess.run(
+        [
+            sys.executable, str(RUN_REPLAY),
+            "--session", str(SESSION_001),
+            "--skip-worker",
+            "--allow-dirty",
+            "--output", str(tmp_path / "dummy.json"),
+        ],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": f"{REPO_ROOT}:{REPO_ROOT / 'src'}"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Second run without --allow-dirty should fail (DB has symbol_intelligence_snapshots from first run)
+    r = subprocess.run(
+        [
+            sys.executable, str(RUN_REPLAY),
+            "--session", str(SESSION_001),
+            "--skip-worker",
+        ],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": f"{REPO_ROOT}:{REPO_ROOT / 'src'}"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode != 0
+    assert "clean validation state" in r.stderr or "allow-dirty" in r.stderr
+    _run_reset_state()

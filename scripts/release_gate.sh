@@ -12,11 +12,13 @@ RUN_UM790=false
 START_INFRA=false
 USE_DOCKER=false
 DOCKER_INNER=false
+DOCKER_NO_BUILDX=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --docker) USE_DOCKER=true; shift ;;
     --docker-inner) DOCKER_INNER=true; shift ;;
+    --docker-no-buildx) DOCKER_NO_BUILDX=true; shift ;;
     --um790) RUN_UM790=true; shift ;;
     --start-infra) START_INFRA=true; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -41,8 +43,24 @@ if [[ "$USE_DOCKER" == true ]] && [[ "$DOCKER_INNER" != true ]]; then
     done
     sleep 2
   fi
-  echo "[release_gate] Running gate in validate container..."
-  docker compose $COMPOSE_TEST run --rm -v "$ROOT:/app" -w /app validate bash -c "scripts/release_gate.sh --docker-inner"
+  if [[ "$DOCKER_NO_BUILDX" == true ]]; then
+    echo "[release_gate] Building validate image with classic docker build..."
+    docker build -f infra/Dockerfile.validate -t stockbot-validate:local .
+    # Run using pre-built image on the same network as postgres/redis
+    NETWORK="$(docker compose $COMPOSE_TEST ps -q postgres 2>/dev/null | xargs -r docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null | head -1)"
+    [[ -z "$NETWORK" ]] && { echo "Could not determine compose network (is postgres running?)" >&2; exit 1; }
+    echo "[release_gate] Running gate in validate container (classic)..."
+    docker run --rm -v "$ROOT:/app" -w /app --network "$NETWORK" \
+      -e DATABASE_URL="postgresql+asyncpg://stockbot:${POSTGRES_PASSWORD}@postgres:5432/stockbot" \
+      -e REDIS_URL="redis://redis:6379/0" \
+      -e ALPACA_API_KEY_ID="${ALPACA_API_KEY_ID}" \
+      -e ALPACA_API_SECRET_KEY="${ALPACA_API_SECRET_KEY}" \
+      -e PYTHONPATH=/app:/app/src \
+      stockbot-validate:local bash -c "scripts/release_gate.sh --docker-inner"
+  else
+    echo "[release_gate] Running gate in validate container..."
+    docker compose $COMPOSE_TEST run --rm -v "$ROOT:/app" -w /app validate bash -c "scripts/release_gate.sh --docker-inner"
+  fi
   exit $?
 fi
 
@@ -127,6 +145,15 @@ else
   exit 1
 fi
 
+# ---- Isolated state: print DB and reset validation tables ----
+echo "[release_gate] Database: $(echo "$DATABASE_URL" | sed 's/:[^:@]*@/:***@/')"
+echo "[release_gate] Resetting validation state (signals, shadow_trades, scrappy_gate_rejections, symbol_intelligence_snapshots)..."
+if ! python3 scripts/reset_validation_state.py; then
+  echo "reset_validation_state failed" >&2
+  run_report_script
+  exit 1
+fi
+
 # ---- 2. DB-backed tests ----
 echo "[release_gate] DB-backed tests..."
 DB_OUT="$(mktemp)"
@@ -142,6 +169,14 @@ else
   exit 1
 fi
 rm -f "$DB_OUT"
+
+# ---- Reset again before replay so replay sees clean state ----
+echo "[release_gate] Resetting validation state before replay..."
+if ! python3 scripts/reset_validation_state.py; then
+  echo "reset_validation_state failed" >&2
+  run_report_script
+  exit 1
+fi
 
 # ---- 3. Replay ----
 echo "[release_gate] Replay session_001..."
