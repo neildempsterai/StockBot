@@ -86,6 +86,8 @@ Any change in golden outputs must be reviewed and explicitly accepted in the Dec
 - From repo root: `make replay` or `PYTHONPATH=.:src python scripts/run_replay.py --session replay/session_001`.
 - Exit 0 = outputs match `replay/session_001/expected_outputs.json`; exit 1 = mismatch and diff printed to stderr.
 
+Replay event ordering: events are merged from bars.jsonl, quotes.jsonl, trades.jsonl, news.jsonl into a single timeline sorted by (timestamp, type_priority). Type priority (for ties) is: news, quote, trade, bar — so quotes and news are delivered before the bar that triggers evaluation. The worker is started before any events; events are pushed in timeline order with an inter-event delay so the worker processes them in order. Use `--debug-timeline` (and optional `--debug-timeline-n N`) to print the first N events to stderr for diagnosis.
+
 ### How to refresh golden outputs
 
 - After an intentional strategy or gate change, run:  

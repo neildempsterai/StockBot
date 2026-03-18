@@ -1,6 +1,7 @@
 """Replay runner integration: produces expected outputs, repeatable, diff detects changes."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -15,6 +16,15 @@ REPLAY_DIFF = REPO_ROOT / "scripts" / "replay_diff.py"
 RESET_STATE = REPO_ROOT / "scripts" / "reset_validation_state.py"
 SESSION_001 = REPO_ROOT / "replay" / "session_001"
 EXPECTED = SESSION_001 / "expected_outputs.json"
+
+
+def _load_run_replay_module():
+    spec = importlib.util.spec_from_file_location("run_replay", RUN_REPLAY)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["run_replay"] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _db_redis_available() -> bool:
@@ -142,3 +152,98 @@ def test_replay_fails_on_dirty_db_without_allow_dirty(requires_db_redis, tmp_pat
     assert r.returncode != 0
     assert "clean validation state" in r.stderr or "allow-dirty" in r.stderr
     _run_reset_state()
+
+
+def test_merged_timeline_deterministic():
+    """Merged timeline is sorted by (ts, type_priority); same input yields same order."""
+    mod = _load_run_replay_module()
+    timeline = mod.build_merged_timeline(SESSION_001)
+    # Check sorted by (ts, priority)
+    for i in range(1, len(timeline)):
+        prev_ts, prev_pri = timeline[i - 1][0], timeline[i - 1][1]
+        curr_ts, curr_pri = timeline[i][0], timeline[i][1]
+        assert (prev_ts, prev_pri) <= (curr_ts, curr_pri)
+    # Deterministic: run again and get same order
+    timeline2 = mod.build_merged_timeline(SESSION_001)
+    assert len(timeline) == len(timeline2)
+    for a, b in zip(timeline, timeline2):
+        assert a[0] == b[0] and a[1] == b[1] and a[2] == b[2]
+
+
+def test_quote_news_before_decision_bar():
+    """Quote and news events precede bars at the same or earlier timestamp."""
+    mod = _load_run_replay_module()
+    timeline = mod.build_merged_timeline(SESSION_001)
+    # session_001: news at 13:30, bars at 13:35..13:40, quotes at 13:35 and 13:40
+    # So any bar at 13:40 must come after news (13:30) and after quotes at 13:35/13:40
+    bar_indices = [i for i, e in enumerate(timeline) if e[2] == "bar"]
+    quote_indices = [i for i, e in enumerate(timeline) if e[2] == "quote"]
+    news_indices = [i for i, e in enumerate(timeline) if e[2] == "news"]
+    assert news_indices, "session_001 has news"
+    assert quote_indices, "session_001 has quotes"
+    # Every bar must appear after all news (news has earliest ts)
+    if news_indices and bar_indices:
+        assert max(news_indices) < min(bar_indices) or timeline[news_indices[0]][0] <= timeline[bar_indices[0]][0]
+    # Bars at 13:40: at least one quote at 13:35 or 13:40 must appear before the first 13:40 bar
+    from datetime import datetime, timezone
+    bar_1340 = [i for i in bar_indices if timeline[i][0].hour == 13 and timeline[i][0].minute == 40]
+    if bar_1340:
+        first_1340_bar_idx = min(bar_1340)
+        # There must be some quote or news before this bar in the timeline
+        assert any(i < first_1340_bar_idx for i in quote_indices + news_indices)
+
+
+def test_full_replay_matches_expected(requires_db_redis, tmp_path):
+    """Full replay (worker running) produces output that matches expected_outputs.json."""
+    _run_reset_state()
+    out_json = tmp_path / "full_actual.json"
+    r = subprocess.run(
+        [
+            sys.executable, str(RUN_REPLAY),
+            "--session", str(SESSION_001),
+            "--output", str(out_json),
+        ],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": f"{REPO_ROOT}:{REPO_ROOT / 'src'}"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert out_json.exists()
+    actual = json.loads(out_json.read_text())
+    expected = json.loads(EXPECTED.read_text())
+    assert actual.get("signal_count") == expected.get("signal_count")
+    assert sorted(actual.get("signal_symbols", [])) == sorted(expected.get("signal_symbols", []))
+    assert actual.get("shadow_trade_count") == expected.get("shadow_trade_count")
+
+
+def test_repeated_replay_identical(requires_db_redis, tmp_path):
+    """Two consecutive full replays (with reset between) produce identical outputs."""
+    out1 = tmp_path / "out1.json"
+    out2 = tmp_path / "out2.json"
+    _run_reset_state()
+    r1 = subprocess.run(
+        [sys.executable, str(RUN_REPLAY), "--session", str(SESSION_001), "--output", str(out1)],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": f"{REPO_ROOT}:{REPO_ROOT / 'src'}"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert r1.returncode == 0, (r1.stdout, r1.stderr)
+    _run_reset_state()
+    r2 = subprocess.run(
+        [sys.executable, str(RUN_REPLAY), "--session", str(SESSION_001), "--output", str(out2)],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": f"{REPO_ROOT}:{REPO_ROOT / 'src'}"},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert r2.returncode == 0, (r2.stdout, r2.stderr)
+    data1 = json.loads(out1.read_text())
+    data2 = json.loads(out2.read_text())
+    assert data1.get("signal_count") == data2.get("signal_count")
+    assert data1.get("signal_symbols") == data2.get("signal_symbols")
+    assert data1.get("shadow_trade_count") == data2.get("shadow_trade_count")

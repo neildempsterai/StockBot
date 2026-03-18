@@ -49,3 +49,8 @@
 - [ ] Ensure replay/session_001 runs against empty signals/trades/rejections state
 - [ ] Add cleanup/reset step or per-run database naming for validation
 - [ ] Make test_replay_runner independent of prior gate runs
+- [ ] Tag and archive v0.1 validated baseline
+- [ ] Add staging experiment support for SCRAPPY_MODE=advisory vs required
+- [ ] Segment metrics and reports by scrappy_mode
+- [ ] Compare acceptance rate, rejection reasons, expectancy, and drawdown across gating modes
+- [ ] Decide whether `SCRAPPY_MODE=required` becomes staging default

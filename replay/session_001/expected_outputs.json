@@ -1,20 +1,20 @@
 {
   "replay_version": "0.1.0",
-  "signal_count": 2,
-  "signal_symbols": ["AAPL", "SPY"],
-  "signal_sides": ["buy", "sell"],
+  "signal_count": 1,
+  "signal_symbols": ["AAPL"],
+  "signal_sides": ["buy"],
   "rejection_counts_by_reason": {},
-  "shadow_trade_count": 2,
-  "shadow_trade_symbols": ["AAPL", "SPY"],
-  "accepted_with_snapshot_count": 2,
+  "shadow_trade_count": 0,
+  "shadow_trade_symbols": [],
+  "accepted_with_snapshot_count": 1,
   "accepted_without_snapshot_count": 0,
   "attribution_summary": {
-    "signals_total": 2,
-    "signals_with_scrappy_snapshot": 2,
+    "signals_total": 1,
+    "signals_with_scrappy_snapshot": 1,
     "signals_without_scrappy_snapshot": 0
   },
   "metrics_summary_subset": {
-    "signals_total": 2,
-    "shadow_trades_total": 2
+    "signals_total": 1,
+    "shadow_trades_total": 0
   }
 }

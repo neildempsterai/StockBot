@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Repo root; src for app imports, repo root for tests.helpers.replay
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -43,6 +44,84 @@ def _load_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _parse_ts(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+# Deterministic order when timestamps tie: news before quote before trade before bar
+# so quotes/news are available before the bar that triggers evaluation.
+EVENT_TYPE_PRIORITY = {"news": 0, "quote": 1, "trade": 2, "bar": 3}
+
+
+def build_merged_timeline(session_dir: Path) -> list[tuple[datetime, int, str, dict]]:
+    """Merge bars, quotes, trades, news from session dir into one list sorted by (ts, type_priority)."""
+    bars = _load_jsonl(session_dir / "bars.jsonl")
+    quotes = _load_jsonl(session_dir / "quotes.jsonl")
+    trades = _load_jsonl(session_dir / "trades.jsonl")
+    news = _load_jsonl(session_dir / "news.jsonl")
+    events: list[tuple[datetime, int, str, dict]] = []
+    for b in bars:
+        ts = _parse_ts(b["timestamp"])
+        events.append((ts, EVENT_TYPE_PRIORITY["bar"], "bar", b))
+    for q in quotes:
+        ts = _parse_ts(q["timestamp"])
+        events.append((ts, EVENT_TYPE_PRIORITY["quote"], "quote", q))
+    for t in trades:
+        ts = _parse_ts(t["timestamp"])
+        events.append((ts, EVENT_TYPE_PRIORITY["trade"], "trade", t))
+    for n in news:
+        created = n.get("created_at")
+        ts = _parse_ts(created) if created else datetime.now(timezone.UTC)
+        events.append((ts, EVENT_TYPE_PRIORITY["news"], "news", n))
+    events.sort(key=lambda e: (e[0], e[1]))
+    return events
+
+
+async def _push_timeline_event(
+    redis_client: Any,
+    event: tuple[datetime, int, str, dict],
+    push_bar_fn: Any,
+    push_quote_fn: Any,
+    push_trade_fn: Any,
+    push_news_fn: Any,
+) -> None:
+    _ts, _pri, typ, payload = event
+    if typ == "bar":
+        await push_bar_fn(
+            redis_client,
+            payload["symbol"],
+            payload["o"],
+            payload["h"],
+            payload["l"],
+            payload["c"],
+            payload["v"],
+            timestamp=_ts,
+        )
+    elif typ == "quote":
+        await push_quote_fn(
+            redis_client,
+            payload["symbol"],
+            payload["bp"],
+            payload["ap"],
+            timestamp=_ts,
+        )
+    elif typ == "trade":
+        await push_trade_fn(
+            redis_client,
+            payload["symbol"],
+            payload["p"],
+            timestamp=_ts,
+        )
+    elif typ == "news":
+        await push_news_fn(
+            redis_client,
+            payload.get("headline", ""),
+            payload.get("summary", ""),
+            symbols=payload.get("symbols", []),
+            published_at=_ts,
+        )
+
+
 async def _is_validation_db_dirty() -> tuple[bool, dict[str, int]]:
     """Return (is_dirty, counts) for signals, shadow_trades, scrappy_gate_rejections, symbol_intelligence_snapshots."""
     from sqlalchemy import text
@@ -64,7 +143,10 @@ async def _run(
     worker_run_seconds: float = 25.0,
     skip_worker: bool = False,
     allow_dirty: bool = False,
+    debug_timeline: bool = False,
+    debug_timeline_n: int = 30,
 ) -> tuple[dict, dict]:
+    import time
     import redis.asyncio as redis
     from tests.helpers.replay import push_bar, push_news, push_quote, push_trade
 
@@ -85,11 +167,17 @@ async def _run(
 
     metadata = _load_json(session_dir / "metadata.json")
     expected = _load_json(session_dir / "expected_outputs.json")
-    bars = _load_jsonl(session_dir / "bars.jsonl")
-    quotes = _load_jsonl(session_dir / "quotes.jsonl")
-    trades = _load_jsonl(session_dir / "trades.jsonl")
-    news = _load_jsonl(session_dir / "news.jsonl")
     snapshots = _load_jsonl(session_dir / "scrappy_snapshots.jsonl")
+    timeline = build_merged_timeline(session_dir)
+
+    if debug_timeline:
+        n = min(debug_timeline_n, len(timeline))
+        for i, (ts, _pri, typ, payload) in enumerate(timeline[:n]):
+            sym = payload.get("symbol", payload.get("symbols", ["-"])[0] if payload.get("symbols") else "-")
+            if isinstance(sym, list):
+                sym = sym[0] if sym else "-"
+            print(f"  {i+1}. {ts.isoformat()} {typ} {sym}", file=sys.stderr)
+        print(f"  ... (showing first {n} of {len(timeline)} events)", file=sys.stderr)
 
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     redis_client = redis.from_url(redis_url, decode_responses=True)
@@ -107,10 +195,10 @@ async def _run(
         await redis_client.delete("stockbot:worker:intra_event_momo:last_ids")
         await redis_client.delete("stockbot:strategies:intra_event_momo:traded_today")
 
-    # Insert Scrappy snapshots
+    # Insert Scrappy snapshots (available before any stream events)
     factory = get_session_factory()
     for row in snapshots:
-        ts = datetime.fromisoformat(row["snapshot_ts"].replace("Z", "+00:00"))
+        ts = _parse_ts(row["snapshot_ts"])
         async with factory() as session:
             await insert_intelligence_snapshot(
                 session,
@@ -132,44 +220,9 @@ async def _run(
                 scrappy_version="0.1.0",
             )
 
-    # Push market events in order
-    for b in bars:
-        ts = datetime.fromisoformat(b["timestamp"].replace("Z", "+00:00"))
-        await push_bar(
-            redis_client,
-            b["symbol"],
-            b["o"],
-            b["h"],
-            b["l"],
-            b["c"],
-            b["v"],
-            timestamp=ts,
-        )
-    for q in quotes:
-        ts = datetime.fromisoformat(q["timestamp"].replace("Z", "+00:00"))
-        await push_quote(redis_client, q["symbol"], q["bp"], q["ap"], timestamp=ts)
-    for t in trades:
-        ts = datetime.fromisoformat(t["timestamp"].replace("Z", "+00:00"))
-        await push_trade(redis_client, t["symbol"], t["p"], timestamp=ts)
-    for n in news:
-        created = n.get("created_at")
-        ts = (
-            datetime.fromisoformat(created.replace("Z", "+00:00"))
-            if created
-            else datetime.now(timezone.UTC)
-        )
-        await push_news(
-            redis_client,
-            n.get("headline", ""),
-            n.get("summary", ""),
-            symbols=n.get("symbols", []),
-            published_at=ts,
-        )
-
-    await redis_client.aclose()
-
+    proc = None
     if not skip_worker:
-        # Run worker in subprocess so we can stop after N seconds and then collect from DB
+        # Start worker before feeding events so it sees them in order
         env = os.environ.copy()
         env["PYTHONPATH"] = str(REPO_ROOT / "src")
         env.setdefault("SCRAPPY_MODE", "advisory")
@@ -180,14 +233,29 @@ async def _run(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        await asyncio.sleep(3)  # worker startup / first xread block
+
+    # Feed events in strict timestamp+priority order. Use a delay between events so the worker's
+    # xread (which reads all streams) sees at most one event type at a time and processes in order.
+    feed_start = time.monotonic()
+    inter_event_delay = 1.2 if not skip_worker else 0.0
+    for ev in timeline:
+        await _push_timeline_event(redis_client, ev, push_bar, push_quote, push_trade, push_news)
+        if not skip_worker and inter_event_delay > 0:
+            await asyncio.sleep(inter_event_delay)
+    await redis_client.aclose()
+
+    if not skip_worker and proc is not None:
+        elapsed = time.monotonic() - feed_start
+        remaining = worker_run_seconds - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
         try:
-            proc.wait(timeout=worker_run_seconds)
-        except subprocess.TimeoutExpired:
             proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
         await asyncio.sleep(1)  # allow DB commits to settle
 
     # Collect outputs from DB
@@ -247,7 +315,7 @@ def _diff(actual: dict, expected: dict) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run replay and compare to golden outputs")
     parser.add_argument("--session", default="replay/session_001", help="Path to session dir")
-    parser.add_argument("--seconds", type=float, default=25.0, help="Worker run seconds")
+    parser.add_argument("--seconds", type=float, default=35.0, help="Worker run seconds (after event feed)")
     parser.add_argument(
         "--skip-worker", action="store_true", help="Only load data, do not run worker"
     )
@@ -260,6 +328,17 @@ def main() -> int:
         "--reset-state",
         action="store_true",
         help="Run reset_validation_state.py before replay",
+    )
+    parser.add_argument(
+        "--debug-timeline",
+        action="store_true",
+        help="Print first N replay events in order to stderr",
+    )
+    parser.add_argument(
+        "--debug-timeline-n",
+        type=int,
+        default=30,
+        help="Number of timeline events to print when --debug-timeline (default 30)",
     )
     parser.add_argument("--output", help="Write actual output JSON to file")
     args = parser.parse_args()
@@ -281,6 +360,8 @@ def main() -> int:
             worker_run_seconds=args.seconds,
             skip_worker=args.skip_worker,
             allow_dirty=args.allow_dirty,
+            debug_timeline=args.debug_timeline,
+            debug_timeline_n=args.debug_timeline_n,
         )
     )
     if args.output:

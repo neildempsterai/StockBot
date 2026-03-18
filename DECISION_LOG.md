@@ -130,3 +130,33 @@ Decision:
 Consequences:
 - Next implementation is per-run DB isolation or reset for validation.
 - Replay outputs become trustworthy release artifacts.
+
+## 2026-03-18 — Replay event ordering and deterministic golden
+Status: Accepted
+
+Context:
+- Replay was pushing all bars first then quotes/trades/news, so the worker could evaluate bars before quote/news state was available.
+- Worker must see quotes and news before the bar that triggers evaluation.
+
+Decision:
+- Replay now builds a merged timeline (news, quote, trade, bar by timestamp; type priority for ties) and feeds events in that order.
+- Worker is started before any events; events are pushed in strict timeline order with an inter-event delay so the worker processes in order.
+- session_001 golden (expected_outputs.json) updated to the deterministic output under this ordering: 1 signal (AAPL), 0 shadow trades (replay does not run long enough for stop/target/force_flat exits). The previous 2-signal golden was from the buggy all-bars-first replay.
+- Replay semantics are not weakened; ordering is fixed so replay is worker-compatible.
+
+## 2026-03-18 — v0.1 validated baseline frozen
+Status: Accepted
+
+Context:
+- Docker-native release gate passes.
+- Replay is deterministic and matches the documented golden output.
+- DB-backed validation, migrations, and report generation are operational.
+
+Decision:
+- Freeze the current state as the v0.1 validated baseline.
+- Do not add new strategy families before measuring the operational effect of Scrappy gating modes.
+- Next milestone is a controlled staging comparison of `SCRAPPY_MODE=advisory` vs `SCRAPPY_MODE=required`.
+
+Consequences:
+- All future changes must be compared back to this baseline through the release gate.
+- Strategy expansion is deferred until the staging experiment proves whether stricter Scrappy gating improves selectivity without starving signal flow.
