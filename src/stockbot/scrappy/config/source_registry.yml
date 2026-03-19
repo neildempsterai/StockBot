@@ -1,0 +1,139 @@
+# Source registry: domain -> content_mode, trust_tier, source_class, fetch_policy.
+# Unknown domains default to metadata_only; never open_text.
+# Every policy decision emits a reason code (source_policy.py).
+
+default_content_mode: metadata_only
+
+domains:
+  sec.gov:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: sec_edgar
+    source_class: official
+    fetch_policy: metadata_only
+  federalreserve.gov:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: fed_releases
+    source_class: official
+    fetch_policy: metadata_only
+  bls.gov:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: bls_releases
+    source_class: official
+    fetch_policy: metadata_only
+  dol.gov:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: dol_releases
+    source_class: official
+    fetch_policy: metadata_only
+  bis.org:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: bis_updates
+    source_class: official
+    fetch_policy: metadata_only
+  census.gov:
+    content_mode: metadata_only
+    trust_tier: high
+    source_name: census
+    source_class: official
+    fetch_policy: metadata_only
+  reuters.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: reuters
+    source_class: media
+    fetch_policy: metadata_only
+  cnbc.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: cnbc
+    source_class: media
+    fetch_policy: metadata_only
+  marketwatch.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: marketwatch
+    source_class: media
+    fetch_policy: metadata_only
+  finance.yahoo.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: yahoo_finance
+    source_class: media
+    fetch_policy: metadata_only
+  yahoo.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: yahoo
+    source_class: media
+    fetch_policy: metadata_only
+  bloomberg.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: bloomberg
+    source_class: media
+    fetch_policy: metadata_only
+  benzinga.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: benzinga
+    source_class: media
+    fetch_policy: metadata_only
+  seekingalpha.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: seeking_alpha
+    source_class: media
+    fetch_policy: metadata_only
+  investing.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: investing_com
+    source_class: media
+    fetch_policy: metadata_only
+  thefly.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: thefly
+    source_class: media
+    fetch_policy: metadata_only
+  prnewswire.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: prnewswire
+    source_class: media
+    fetch_policy: metadata_only
+  businesswire.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: businesswire
+    source_class: media
+    fetch_policy: metadata_only
+  globenewswire.com:
+    content_mode: metadata_only
+    trust_tier: medium
+    source_name: globenewswire
+    source_class: media
+    fetch_policy: metadata_only
+  facebook.com:
+    content_mode: blocked
+    trust_tier: none
+    source_name: facebook
+    source_class: blocked
+    fetch_policy: blocked
+  twitter.com:
+    content_mode: blocked
+    trust_tier: none
+    source_name: twitter
+    source_class: blocked
+    fetch_policy: blocked
+  t.co:
+    content_mode: blocked
+    trust_tier: none
+    source_name: tco
+    source_class: blocked
+    fetch_policy: blocked

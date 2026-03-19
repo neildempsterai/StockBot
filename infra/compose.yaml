@@ -1,0 +1,150 @@
+# StockBot stack. Run from repo root: ./scripts/compose.sh up -d
+# Full rebuild: ./scripts/compose.sh build --no-cache && ./scripts/compose.sh up -d --force-recreate
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stockbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockbot}
+      POSTGRES_DB: ${POSTGRES_DB:-stockbot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stockbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  alpaca_market_gateway:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.gateways.market_gateway"]
+    environment:
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
+      REDIS_URL: redis://redis:6379/0
+      FEED: iex
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  alpaca_trade_gateway:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.gateways.trade_gateway"]
+    environment:
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  alpaca_reconciler:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.gateways.reconciler"]
+    environment:
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  api:
+    build: { context: .., dockerfile: infra/Dockerfile.app }
+    image: infra-app:latest
+    ports:
+      - "8000:8000"
+    env_file: [ "../.env" ]
+    environment:
+      RUN_MIGRATIONS: "1"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+      REDIS_URL: redis://redis:6379/0
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY:-}
+      EXECUTION_MODE: ${EXECUTION_MODE:-shadow}
+      PAPER_EXECUTION_ENABLED: ${PAPER_EXECUTION_ENABLED:-false}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    image: infra-app:latest
+    command: ["python", "-m", "worker.main"]
+    env_file: [ "../.env" ]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+      REDIS_URL: redis://redis:6379/0
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
+      STOCKBOT_UNIVERSE: ${STOCKBOT_UNIVERSE:-AAPL,AMD,AMZN,META,MSFT,NVDA,QQQ,SPY,TSLA}
+      EXECUTION_MODE: ${EXECUTION_MODE:-shadow}
+      PAPER_EXECUTION_ENABLED: ${PAPER_EXECUTION_ENABLED:-false}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  scheduler:
+    image: infra-app:latest
+    command: ["python", "-m", "scheduler.main"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  scanner:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.scanner.main"]
+    env_file: [ "../.env" ]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+      REDIS_URL: redis://redis:6379/0
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
+      ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  scrappy_auto:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.scrappy.auto_runner"]
+    env_file: [ "../.env" ]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  ui:
+    build: { context: .., dockerfile: infra/Dockerfile.ui }
+    image: infra-ui:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

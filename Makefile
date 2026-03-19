@@ -11,9 +11,9 @@ test:
 	docker run --rm -v "$(CURDIR):/app" -w /app -e ALPACA_API_KEY_ID=dummy -e ALPACA_API_SECRET_KEY=dummy -e DATABASE_URL=sqlite:///tmp/db -e REDIS_URL=redis://localhost:6379/0 python:3.11-slim bash -c "pip install -q '.[dev]' && pytest tests -v --tb=short"
 
 # Bring up Postgres + Redis, run migrations, then run full test suite (including DB-backed tests).
-# Use this for a single command that makes the platform 100%% operational and verifies it.
+# Requires infra/compose.yaml and .env. Use: make up-infra first if needed.
 test-full:
-	@bash -c "cd '$(CURDIR)' && . ./scripts/ensure_infra.sh && export PYTHONPATH='$(CURDIR):$(CURDIR)/src' && pytest tests -v --tb=short"
+	@bash -c "cd '$(CURDIR)' && ./scripts/ensure_infra.sh && export PYTHONPATH='$(CURDIR):$(CURDIR)/src' && pytest tests -v --tb=short"
 
 # Start Postgres + Redis and run migrations. After this, run the API/worker or pytest with DB.
 up-infra:
@@ -55,8 +55,11 @@ release-gate-docker-classic:
 validate-docker:
 	docker compose -f infra/compose.yaml -f infra/compose.test.yaml run --rm -v "$(CURDIR):/app" -w /app validate
 
+# Validate compose file. Requires POSTGRES_PASSWORD, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY in env or .env.
 compose-config:
-	POSTGRES_PASSWORD=$${POSTGRES_PASSWORD?} ALPACA_API_KEY_ID=$${ALPACA_API_KEY_ID?} ALPACA_API_SECRET_KEY=$${ALPACA_API_SECRET_KEY?} docker compose -f infra/compose.yaml config --quiet && echo "docker compose config OK"
+	@cd "$(CURDIR)" && ( test -f infra/compose.yaml || (echo "infra/compose.yaml not found" >&2; exit 1) ) && \
+	POSTGRES_PASSWORD=$${POSTGRES_PASSWORD?} ALPACA_API_KEY_ID=$${ALPACA_API_KEY_ID?} ALPACA_API_SECRET_KEY=$${ALPACA_API_SECRET_KEY?} docker compose -f infra/compose.yaml -p infra config --quiet && echo "docker compose config OK"
 
+# Full-stack: compose config, migrations, up, then HTTP checks. Use API_ONLY=1 for external API only.
 runtime-truth-validate:
 	bash ./scripts/runtime_truth_validate.sh

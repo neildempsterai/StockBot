@@ -1,0 +1,7 @@
+# UI: serve frontend dist with nginx on 8080, proxy /api to backend.
+# Build from repo root: docker build -f infra/Dockerfile.ui -t infra-ui .
+FROM nginx:alpine
+COPY frontend/dist /usr/share/nginx/html/
+COPY infra/nginx-ui.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+# Default nginx CMD

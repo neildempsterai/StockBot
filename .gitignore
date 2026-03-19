@@ -11,3 +11,5 @@ build/
 .idea/
 .vscode/
 .DS_Store
+artifacts/
+src_from_image/

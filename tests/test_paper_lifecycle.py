@@ -29,8 +29,17 @@ def test_paper_test_status_shape(client: TestClient) -> None:
     assert r.status_code in (200, 503)
     if r.status_code == 200:
         data = r.json()
-        # Must not be fake/demo; must reflect real state
-        assert "paper_enabled" in data or "paper_execution_enabled" in data or "detail" not in data
+        # Must distinguish state: paper_disabled | credentials_missing | broker_unavailable | broker_connected_no_proof | proof_partial | proof_complete
+        assert "state" in data
+        assert data["state"] in (
+            "paper_disabled",
+            "credentials_missing",
+            "broker_unavailable",
+            "broker_connected_no_proof",
+            "proof_partial",
+            "proof_complete",
+        )
+        assert "paper_enabled" in data or "paper_execution_enabled" in data
     else:
         assert "detail" in r.json()
 
