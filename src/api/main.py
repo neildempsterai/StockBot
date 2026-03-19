@@ -1,0 +1,1847 @@
+"""API service: health, strategies, signals, shadow trades, metrics. Manual signal submit is test-only."""
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from uuid import UUID
+
+import redis.asyncio as redis
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import OperationalError
+
+from asyncpg.exceptions import InvalidPasswordError
+
+from stockbot.ai_referee.store import (
+    aggregate_decision_counts,
+    aggregate_assisted_vs_unassisted_metrics,
+    get_assessment_by_id,
+    get_assessment_row_by_pk,
+    list_recent_assessments,
+)
+from stockbot.alpaca.client import AlpacaClient
+from stockbot.config import get_settings
+from stockbot.execution.paper_test import (
+    get_paper_test_status,
+    run_buy_cover,
+    run_buy_open,
+    run_cancel_all,
+    run_flatten_all,
+    run_sell_close,
+    run_short_open,
+)
+from stockbot.db.models import (
+    AiRefereeAssessment,
+    BacktestRun,
+    BacktestSummary,
+    BacktestTrade,
+    Fill,
+    OpportunityCandidateRow,
+    OpportunityRun,
+    PaperAccountSnapshot,
+    PaperOrder,
+    PaperPortfolioHistoryPoint,
+    ReconciliationLog,
+    ScannerCandidateRow,
+    ScannerRun,
+    ScannerToplistSnapshot,
+    ScrappyAutoRun,
+    ShadowTrade,
+    Signal,
+    SymbolIntelligenceSnapshot,
+)
+from stockbot.db.session import get_session_factory
+from stockbot.ledger.store import LedgerStore
+from stockbot.scrappy.api import router as scrappy_router
+from stockbot.scrappy.store import (
+    get_gate_rejection_counts,
+    get_gate_rejection_counts_by_mode,
+    get_latest_snapshot_by_symbol,
+    get_recent_snapshots,
+)
+from stockbot.scanner.store import (
+    get_candidates_for_run,
+    get_latest_live_scanner_run,
+    get_latest_live_toplist_snapshot,
+    get_latest_toplist_snapshot,
+    get_scanner_run_by_id,
+    get_scanner_runs,
+    _row_to_candidate,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+
+
+app = FastAPI(title="StockBot API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(scrappy_router)
+
+
+@app.exception_handler(InvalidPasswordError)
+async def db_invalid_password_handler(_request: Request, exc: InvalidPasswordError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/compose.sh up -d)."
+        },
+    )
+
+
+@app.exception_handler(OperationalError)
+async def db_operational_error_handler(_request: Request, exc: OperationalError) -> JSONResponse:
+    orig = getattr(exc, "orig", None)
+    if type(orig).__name__ == "InvalidPasswordError" or "password authentication failed" in str(orig or exc):
+        detail = "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/compose.sh up -d)."
+    else:
+        detail = f"Database unavailable: {str(orig) if orig else str(exc)}"
+    return JSONResponse(status_code=503, content={"detail": detail})
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+WORKER_HEARTBEAT_KEY = "stockbot:worker:heartbeat"
+GATEWAY_MARKET_HEARTBEAT_KEY = "stockbot:gateway:market:heartbeat"
+GATEWAY_SYMBOL_REFRESH_TS_KEY = "stockbot:gateway:market:symbol_refresh_ts"
+GATEWAY_SYMBOL_COUNT_KEY = "stockbot:gateway:market:symbol_count"
+GATEWAY_SYMBOL_SOURCE_KEY = "stockbot:gateway:market:symbol_source"
+GATEWAY_FALLBACK_REASON_KEY = "stockbot:gateway:market:fallback_reason"
+SCANNER_TOP_TS_KEY = "stockbot:scanner:top_updated_at"
+WORKER_UNIVERSE_REFRESH_TS_KEY = "stockbot:worker:universe_refresh_ts"
+WORKER_UNIVERSE_SOURCE_KEY = "stockbot:worker:universe_source"
+WORKER_UNIVERSE_COUNT_KEY = "stockbot:worker:universe_count"
+WORKER_FALLBACK_REASON_KEY = "stockbot:worker:universe_fallback_reason"
+
+
+@app.get("/health/detail")
+async def health_detail() -> dict:
+    """API, database, Redis, worker, gateway status; live universe and freshness for System Health."""
+    out: dict = {"api": "ok"}
+
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(text("SELECT 1"))
+        out["database"] = "ok"
+    except Exception as e:
+        out["database"] = "error"
+        out["database_hint"] = str(e).split("\n")[0][:120]
+
+    try:
+        from stockbot.market_sessions import current_session
+        out["session"] = current_session()
+    except Exception:
+        out["session"] = "unknown"
+
+    try:
+        settings = get_settings()
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        await r.ping()
+        worker_ts = await r.get(WORKER_HEARTBEAT_KEY)
+        gateway_ts = await r.get(GATEWAY_MARKET_HEARTBEAT_KEY)
+        gateway_symbol_refresh_ts = await r.get(GATEWAY_SYMBOL_REFRESH_TS_KEY)
+        gateway_symbol_count = await r.get(GATEWAY_SYMBOL_COUNT_KEY)
+        gateway_symbol_source = await r.get(GATEWAY_SYMBOL_SOURCE_KEY)
+        gateway_fallback_reason = await r.get(GATEWAY_FALLBACK_REASON_KEY)
+        worker_universe_refresh_ts = await r.get(WORKER_UNIVERSE_REFRESH_TS_KEY)
+        worker_universe_source = await r.get(WORKER_UNIVERSE_SOURCE_KEY)
+        worker_universe_count = await r.get(WORKER_UNIVERSE_COUNT_KEY)
+        worker_fallback_reason = await r.get(WORKER_FALLBACK_REASON_KEY)
+        await r.aclose()
+        out["redis"] = "ok"
+        out["worker"] = "ok" if worker_ts else "no_heartbeat"
+        out["alpaca_gateway"] = "ok" if gateway_ts else "no_heartbeat"
+        out["gateway_symbol_count"] = int(gateway_symbol_count) if gateway_symbol_count is not None else None
+        out["gateway_symbol_refresh_ts"] = gateway_symbol_refresh_ts
+        out["gateway_symbol_source"] = gateway_symbol_source
+        out["gateway_fallback_reason"] = gateway_fallback_reason or None
+        out["dynamic_symbols_available"] = gateway_symbol_source == "dynamic"
+        out["worker_universe_count"] = int(worker_universe_count) if worker_universe_count is not None else None
+        out["worker_universe_source"] = worker_universe_source
+        out["worker_universe_refresh_ts"] = worker_universe_refresh_ts
+        out["worker_fallback_reason"] = worker_fallback_reason or None
+    except Exception:
+        out["redis"] = "error"
+        out["worker"] = "error"
+        out["alpaca_gateway"] = "error"
+        out["gateway_symbol_count"] = None
+        out["gateway_symbol_refresh_ts"] = None
+        out["gateway_symbol_source"] = None
+        out["gateway_fallback_reason"] = None
+        out["dynamic_symbols_available"] = False
+        out["worker_universe_count"] = None
+        out["worker_universe_source"] = None
+        out["worker_fallback_reason"] = None
+        out["worker_universe_refresh_ts"] = None
+
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            r = await session.execute(
+                select(ScannerRun)
+                .where(ScannerRun.mode != "historical")
+                .order_by(ScannerRun.run_ts.desc())
+                .limit(1)
+            )
+            last_scanner = r.scalars().first()
+            r2 = await session.execute(
+                select(OpportunityRun)
+                .where(~OpportunityRun.run_id.like("hist_%"))
+                .order_by(OpportunityRun.run_ts.desc())
+                .limit(1)
+            )
+            last_opportunity = r2.scalars().first()
+            r3 = await session.execute(
+                select(ScrappyAutoRun).order_by(ScrappyAutoRun.run_ts.desc()).limit(1)
+            )
+            last_scrappy_auto = r3.scalars().first()
+        out["last_scanner_run_ts"] = last_scanner.run_ts.isoformat() if last_scanner and last_scanner.run_ts else None
+        out["last_opportunity_run_ts"] = last_opportunity.run_ts.isoformat() if last_opportunity and last_opportunity.run_ts else None
+        out["last_scrappy_auto_run_ts"] = last_scrappy_auto.run_ts.isoformat() if last_scrappy_auto and last_scrappy_auto.run_ts else None
+    except Exception:
+        out["last_scanner_run_ts"] = None
+        out["last_opportunity_run_ts"] = None
+        out["last_scrappy_auto_run_ts"] = None
+
+    return out
+
+
+@app.get("/v1/config")
+def get_config() -> dict:
+    """Read-only runtime config truth. No secrets."""
+    s = get_settings()
+    paper_e2e_supported = bool(s.alpaca_api_key_id and s.alpaca_api_secret_key)
+    return {
+        "FEED": s.feed,
+        "EXTENDED_HOURS_ENABLED": s.extended_hours_enabled,
+        "SCRAPPY_MODE": s.scrappy_mode,
+        "AI_REFEREE_MODE": s.ai_referee_mode,
+        "AI_REFEREE_ENABLED": s.ai_referee_enabled,
+        "SCANNER_MODE": s.scanner_mode,
+        "SCANNER_TOP_STALE_SEC": s.scanner_top_stale_sec,
+        "STOCKBOT_UNIVERSE": s.stockbot_universe,
+        "EXECUTION_MODE": getattr(s, "execution_mode", "shadow"),
+        "PAPER_EXECUTION_ENABLED": getattr(s, "paper_execution_enabled", False),
+        "PAPER_EXECUTION_E2E_SUPPORTED": paper_e2e_supported,
+        "PAPER_EXECUTION_E2E_NOTE": (
+            "Supported when Alpaca credentials are configured and trade gateway/reconciler are running."
+            if paper_e2e_supported
+            else "Not currently supported end-to-end because Alpaca credentials are not configured."
+        ),
+    }
+
+
+@app.get("/v1/runtime/status")
+async def runtime_status() -> dict:
+    """Runtime mode truth: source-of-symbols, scheduler/ui mode, and paper support status."""
+    s = get_settings()
+    paper_e2e_supported = bool(s.alpaca_api_key_id and s.alpaca_api_secret_key)
+    out: dict = {
+        "strategy": {
+            "id": "INTRA_EVENT_MOMO",
+            "version": "0.1.0",
+            "execution_mode": s.execution_mode,
+            "paper_execution_enabled": s.paper_execution_enabled,
+        },
+        "market_data": {
+            "feed": s.feed,
+            "extended_hours_enabled": s.extended_hours_enabled,
+        },
+        "scheduler": {
+            "mode": "daily_reset_only",
+            "note": "Current scheduler only clears traded_today at 04:00 ET; no orchestration.",
+        },
+        "ui": {
+            "mode": "react_operator_console",
+            "note": "UI consumes backend routes only; no mock data mode in runtime endpoints.",
+        },
+        "paper_execution": {
+            "supported_end_to_end": paper_e2e_supported,
+            "note": (
+                "Worker can submit paper orders; trade updates and reconciliation services exist in compose."
+                if paper_e2e_supported
+                else "Not yet supported end-to-end in this runtime because Alpaca credentials are missing."
+            ),
+        },
+    }
+    try:
+        r = redis.from_url(s.redis_url, decode_responses=True)
+        gateway_source = await r.get(GATEWAY_SYMBOL_SOURCE_KEY)
+        gateway_reason = await r.get(GATEWAY_FALLBACK_REASON_KEY)
+        gateway_count = await r.get(GATEWAY_SYMBOL_COUNT_KEY)
+        gateway_refresh_ts = await r.get(GATEWAY_SYMBOL_REFRESH_TS_KEY)
+        worker_source = await r.get(WORKER_UNIVERSE_SOURCE_KEY)
+        worker_reason = await r.get(WORKER_FALLBACK_REASON_KEY)
+        worker_count = await r.get(WORKER_UNIVERSE_COUNT_KEY)
+        worker_refresh_ts = await r.get(WORKER_UNIVERSE_REFRESH_TS_KEY)
+        scanner_top_ts = await r.get(SCANNER_TOP_TS_KEY)
+        await r.aclose()
+        out["symbol_source"] = {
+            "gateway": {
+                "active_source": gateway_source or "unknown",
+                "active_source_label": "redis_dynamic" if gateway_source == "dynamic" else "static_env",
+                "symbol_count": int(gateway_count) if gateway_count is not None else None,
+                "refresh_ts": gateway_refresh_ts,
+                "fallback_reason": gateway_reason or None,
+            },
+            "worker": {
+                "active_source": worker_source or "unknown",
+                "active_source_label": "redis_dynamic" if worker_source in ("dynamic", "hybrid") else "static_env",
+                "symbol_count": int(worker_count) if worker_count is not None else None,
+                "refresh_ts": worker_refresh_ts,
+                "fallback_reason": worker_reason or None,
+            },
+            "dynamic_universe_last_updated_at": scanner_top_ts,
+            "dynamic_universe_stale_after_sec": s.scanner_top_stale_sec,
+        }
+    except Exception as e:
+        out["symbol_source"] = {
+            "gateway": {"active_source": "unknown", "active_source_label": "unknown", "fallback_reason": None},
+            "worker": {"active_source": "unknown", "active_source_label": "unknown", "fallback_reason": None},
+            "dynamic_universe_last_updated_at": None,
+            "dynamic_universe_stale_after_sec": s.scanner_top_stale_sec,
+            "error": str(e)[:120],
+        }
+    return out
+
+
+def _replay_sessions() -> list[dict]:
+    """Discover replay sessions from replay/ dir (if present)."""
+    # API may run in Docker without replay/; repo root relative to this file.
+    replay_dir = Path(__file__).resolve().parent.parent.parent / "replay"
+    if not replay_dir.is_dir():
+        return []
+    sessions = []
+    for path in replay_dir.iterdir():
+        if not path.is_dir():
+            continue
+        meta_file = path / "metadata.json"
+        if not meta_file.is_file():
+            continue
+        try:
+            with meta_file.open() as f:
+                meta = json.load(f)
+            sessions.append({
+                "id": meta.get("session_id", path.name),
+                "date_utc": meta.get("date_utc", ""),
+                "description": meta.get("description", ""),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    sessions.sort(key=lambda s: s["id"])
+    return sessions
+
+
+@app.get("/v1/backtest/status")
+def backtest_status() -> dict:
+    """Backtest runner status for Strategy Lab: available sessions and message."""
+    sessions = _replay_sessions()
+    available = len(sessions) > 0
+    if available:
+        message = "Replay sessions available. Run from host: make replay (or python scripts/run_replay.py --session replay/session_001). REST trigger for Strategy Lab is planned."
+    else:
+        message = "Replay data not in container. On host, run: make replay. REST trigger for Strategy Lab is planned."
+    return {
+        "available": available,
+        "sessions": sessions,
+        "message": message,
+    }
+
+
+@app.get("/v1/strategies")
+async def list_strategies() -> dict:
+    """List configured strategies (INTRA_EVENT_MOMO). Mode reflects EXECUTION_MODE (shadow | paper)."""
+    settings = get_settings()
+    mode = getattr(settings, "execution_mode", "shadow")
+    mode_label = "paper" if mode == "paper" else "shadow-only"
+    return {
+        "strategies": [
+            {
+                "strategy_id": "INTRA_EVENT_MOMO",
+                "strategy_version": "0.1.0",
+                "mode": mode_label,
+                "entry_window_et": "09:35-11:30",
+                "force_flat_et": "15:45",
+            }
+        ]
+    }
+
+
+@app.get("/v1/signals")
+async def list_signals(
+    limit: int = Query(default=50, ge=1, le=200),
+    scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+) -> dict:
+    """Recent signals from DB, optionally filtered by scrappy_mode."""
+    factory = get_session_factory()
+    async with factory() as session:
+        store = LedgerStore(session)
+        signals = await store.get_signals(limit=limit, scrappy_mode=scrappy_mode)
+    return {
+        "signals": [
+            {
+                "signal_uuid": str(s.signal_uuid),
+                "symbol": s.symbol,
+                "side": s.side,
+                "qty": float(s.qty) if s.qty else None,
+                "strategy_id": s.strategy_id,
+                "strategy_version": s.strategy_version,
+                "feed": s.feed,
+                "signal_ts": s.quote_ts.isoformat() if s.quote_ts else None,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "reason_codes": s.reason_codes,
+                "scrappy_mode": getattr(s, "scrappy_mode", None),
+                "paper_order_id": getattr(s, "paper_order_id", None),
+                "execution_mode": getattr(s, "execution_mode", None),
+            }
+            for s in signals
+        ],
+        "count": len(signals),
+        "scrappy_mode_filter": scrappy_mode,
+    }
+
+
+def _snapshot_to_dict(snap: SymbolIntelligenceSnapshot | None) -> dict | None:
+    if not snap:
+        return None
+    # catalyst_strength is int in DB; always serialize as string for frontend
+    raw_strength = getattr(snap, "catalyst_strength", None)
+    catalyst_strength: str | None = str(raw_strength) if raw_strength is not None else None
+    headline_set = getattr(snap, "headline_set_json", None) or []
+    headline_count = len(headline_set) if isinstance(headline_set, list) else 0
+    out = {
+        "id": snap.id,
+        "symbol": snap.symbol,
+        "snapshot_ts": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
+        "freshness_minutes": snap.freshness_minutes,
+        "catalyst_direction": snap.catalyst_direction,
+        "catalyst_strength": catalyst_strength,
+        "sentiment_label": snap.sentiment_label,
+        "evidence_count": snap.evidence_count,
+        "source_count": snap.source_count,
+        "stale_flag": bool(snap.stale_flag) if snap.stale_flag is not None else None,
+        "conflict_flag": bool(snap.conflict_flag) if snap.conflict_flag is not None else None,
+        "scrappy_run_id": snap.scrappy_run_id,
+        "scrappy_version": snap.scrappy_version,
+        "headline_count": headline_count,
+        "headlines": headline_set[:10] if isinstance(headline_set, list) else [],
+    }
+    return out
+
+
+def _snapshot_to_scrappy_enrichment(snap: SymbolIntelligenceSnapshot | None) -> dict:
+    """Flat Scrappy-facing fields for opportunity/signal enrichment."""
+    if not snap:
+        return {}
+    raw_strength = getattr(snap, "catalyst_strength", None)
+    catalyst_strength: str | None = str(raw_strength) if raw_strength is not None else None
+    headline_set = getattr(snap, "headline_set_json", None) or []
+    headline_count = len(headline_set) if isinstance(headline_set, list) else 0
+    return {
+        "latest_scrappy_snapshot_id": snap.id,
+        "latest_scrappy_snapshot_ts": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
+        "scrappy_catalyst_direction": snap.catalyst_direction,
+        "scrappy_catalyst_strength": catalyst_strength,
+        "scrappy_stale_flag": bool(snap.stale_flag) if snap.stale_flag is not None else None,
+        "scrappy_conflict_flag": bool(snap.conflict_flag) if snap.conflict_flag is not None else None,
+        "scrappy_evidence_count": snap.evidence_count,
+        "scrappy_source_count": snap.source_count,
+        "scrappy_headline_count": headline_count,
+    }
+
+
+async def _get_latest_snapshots_for_symbols(session, symbols: list[str]) -> dict[str, SymbolIntelligenceSnapshot]:
+    """Return dict symbol -> latest snapshot row for each symbol (for Scrappy enrichment)."""
+    if not symbols:
+        return {}
+    seen: set[str] = set()
+    result: dict[str, SymbolIntelligenceSnapshot] = {}
+    r = await session.execute(
+        select(SymbolIntelligenceSnapshot)
+        .where(SymbolIntelligenceSnapshot.symbol.in_(symbols))
+        .order_by(SymbolIntelligenceSnapshot.snapshot_ts.desc())
+    )
+    for row in r.scalars().all():
+        sym = (row.symbol or "").strip()
+        if sym and sym not in seen:
+            seen.add(sym)
+            result[sym] = row
+    return result
+
+
+def _referee_assessment_to_dict(a: AiRefereeAssessment | None) -> dict | None:
+    if not a:
+        return None
+    return {
+        "id": a.id,
+        "assessment_id": a.assessment_id,
+        "assessment_ts": a.assessment_ts.isoformat() if a.assessment_ts else None,
+        "symbol": a.symbol,
+        "strategy_id": a.strategy_id,
+        "strategy_version": a.strategy_version,
+        "model_name": a.model_name,
+        "referee_version": a.referee_version,
+        "setup_quality_score": a.setup_quality_score,
+        "catalyst_strength": a.catalyst_strength,
+        "regime_label": a.regime_label,
+        "evidence_sufficiency": a.evidence_sufficiency,
+        "contradiction_flag": a.contradiction_flag,
+        "stale_flag": a.stale_flag,
+        "decision_class": a.decision_class,
+        "reason_codes": a.reason_codes_json or [],
+        "plain_english_rationale": a.plain_english_rationale,
+    }
+
+
+@app.get("/v1/signals/{signal_uuid}")
+async def get_signal(signal_uuid: UUID) -> dict:
+    """Single signal by UUID; includes linked intelligence snapshot and AI referee assessment if present."""
+    factory = get_session_factory()
+    async with factory() as session:
+        store = LedgerStore(session)
+        s = await store.get_signal_by_uuid(signal_uuid)
+        snapshot = None
+        referee = None
+        if s:
+            if getattr(s, "intelligence_snapshot_id", None):
+                from sqlalchemy import select
+                r = await session.execute(
+                    select(SymbolIntelligenceSnapshot).where(
+                        SymbolIntelligenceSnapshot.id == s.intelligence_snapshot_id
+                    ).limit(1)
+                )
+                snapshot = r.scalars().first()
+            if getattr(s, "ai_referee_assessment_id", None):
+                referee = await get_assessment_row_by_pk(session, s.ai_referee_assessment_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="not_found")
+    reason_codes = s.reason_codes or []
+    scrappy_reason_codes = [rc for rc in reason_codes if isinstance(rc, str) and ("scrappy_" in rc.lower() or rc.lower().startswith("scrappy"))]
+    out = {
+        "signal_uuid": str(s.signal_uuid),
+        "symbol": s.symbol,
+        "side": s.side,
+        "qty": float(s.qty) if s.qty else None,
+        "strategy_id": s.strategy_id,
+        "strategy_version": s.strategy_version,
+        "feed": s.feed,
+        "signal_ts": s.quote_ts.isoformat() if s.quote_ts else None,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "reason_codes": reason_codes,
+        "scrappy_reason_codes": scrappy_reason_codes,
+        "feature_snapshot_json": s.feature_snapshot_json,
+        "quote_snapshot_json": s.quote_snapshot_json,
+        "news_snapshot_json": s.news_snapshot_json,
+        "intelligence_snapshot_id": getattr(s, "intelligence_snapshot_id", None),
+        "scrappy_mode": getattr(s, "scrappy_mode", None),
+        "ai_referee_assessment_id": getattr(s, "ai_referee_assessment_id", None),
+        "paper_order_id": getattr(s, "paper_order_id", None),
+        "execution_mode": getattr(s, "execution_mode", None),
+    }
+    if snapshot:
+        out["intelligence_snapshot"] = _snapshot_to_dict(snapshot)
+    if referee:
+        out["ai_referee_assessment"] = _referee_assessment_to_dict(referee)
+    return out
+
+
+@app.get("/v1/intelligence/latest")
+async def intelligence_latest(symbol: str = Query(..., min_length=1, max_length=32)) -> dict:
+    """Latest intelligence snapshot for symbol."""
+    factory = get_session_factory()
+    async with factory() as session:
+        snap = await get_latest_snapshot_by_symbol(session, symbol.strip().upper())
+    if not snap:
+        raise HTTPException(status_code=404, detail="no_snapshot")
+    return _snapshot_to_dict(snap) or {}
+
+
+@app.get("/v1/intelligence/recent")
+async def intelligence_recent(
+    symbol: str | None = Query(None, max_length=32),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Recent intelligence snapshots, optionally filtered by symbol."""
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = await get_recent_snapshots(session, limit=limit, symbol=symbol.strip().upper() if symbol else None)
+    return {
+        "snapshots": [_snapshot_to_dict(r) for r in rows],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/intelligence/summary")
+async def intelligence_summary() -> dict:
+    """Summary: snapshot count, per-symbol latest, stale/conflict/fresh counts for operator visibility."""
+    factory = get_session_factory()
+    async with factory() as session:
+        total = (await session.execute(select(func.count(SymbolIntelligenceSnapshot.id)))).scalar() or 0
+        rows = await get_recent_snapshots(session, limit=500)
+    by_symbol: dict[str, dict] = {}
+    stale_count = conflict_count = fresh_count = 0
+    for r in rows:
+        if r.symbol not in by_symbol:
+            by_symbol[r.symbol] = _snapshot_to_dict(r) or {}
+        if getattr(r, "stale_flag", False):
+            stale_count += 1
+        elif getattr(r, "conflict_flag", False):
+            conflict_count += 1
+        else:
+            fresh_count += 1
+    return {
+        "snapshots_total": total,
+        "symbols_with_snapshot": len(by_symbol),
+        "by_symbol": by_symbol,
+        "stale_count": stale_count,
+        "conflict_count": conflict_count,
+        "fresh_count": fresh_count,
+    }
+
+
+@app.get("/v1/shadow/trades")
+async def list_shadow_trades(
+    limit: int = Query(default=50, ge=1, le=200),
+    scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+) -> dict:
+    """Recent shadow trades (ideal + realistic), optionally filtered by scrappy_mode."""
+    factory = get_session_factory()
+    async with factory() as session:
+        store = LedgerStore(session)
+        trades = await store.list_shadow_trades(limit=limit, scrappy_mode=scrappy_mode)
+    return {
+        "trades": [
+            {
+                "signal_uuid": str(t.signal_uuid),
+                "execution_mode": t.execution_mode,
+                "entry_ts": t.entry_ts.isoformat() if t.entry_ts else None,
+                "exit_ts": t.exit_ts.isoformat() if t.exit_ts else None,
+                "entry_price": float(t.entry_price) if t.entry_price else None,
+                "exit_price": float(t.exit_price) if t.exit_price else None,
+                "exit_reason": t.exit_reason,
+                "qty": float(t.qty) if t.qty else None,
+                "gross_pnl": float(t.gross_pnl) if t.gross_pnl else None,
+                "net_pnl": float(t.net_pnl) if t.net_pnl else None,
+                "scrappy_mode": getattr(t, "scrappy_mode", None),
+            }
+            for t in trades
+        ],
+        "count": len(trades),
+        "scrappy_mode_filter": scrappy_mode,
+    }
+
+
+# ---------- Alpaca paper account (broker truth for UI) ----------
+
+def _alpaca_client_or_503() -> AlpacaClient:
+    """Return AlpacaClient or raise HTTPException 503 if not configured."""
+    s = get_settings()
+    if not s.alpaca_api_key_id or not s.alpaca_api_secret_key:
+        raise HTTPException(status_code=503, detail="Alpaca not configured (ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY)")
+    return AlpacaClient()
+
+
+@app.get("/v1/account")
+def get_paper_account() -> dict:
+    """Paper account: status, equity, cash, buying power, tradable (full Alpaca response)."""
+    client = _alpaca_client_or_503()
+    try:
+        return client.get_account()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca account: {str(e)[:200]}")
+
+
+@app.get("/v1/account/status")
+def get_account_status() -> dict:
+    """Account protection and trading visibility: PDT, trading_blocked, buying power, equity. For operator UI per Alpaca playbook."""
+    client = _alpaca_client_or_503()
+    try:
+        acc = client.get_account()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca account: {str(e)[:200]}")
+    return {
+        "trading_blocked": acc.get("trading_blocked"),
+        "account_blocked": acc.get("account_blocked"),
+        "pattern_day_trader": acc.get("pattern_day_trader"),
+        "daytrading_buying_power": acc.get("daytrading_buying_power"),
+        "buying_power": acc.get("buying_power"),
+        "equity": acc.get("equity"),
+        "cash": acc.get("cash"),
+        "status": acc.get("status"),
+        "multiplier": acc.get("multiplier"),
+    }
+
+
+@app.get("/v1/positions")
+def list_paper_positions() -> dict:
+    """Paper open positions."""
+    client = _alpaca_client_or_503()
+    try:
+        positions = client.list_positions()
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca positions: {str(e)[:200]}")
+
+
+@app.get("/v1/positions/{symbol_or_asset_id}")
+def get_paper_position(symbol_or_asset_id: str) -> dict:
+    """Single paper position by symbol or asset ID."""
+    client = _alpaca_client_or_503()
+    try:
+        pos = client.get_position(symbol_or_asset_id)
+        if pos is None:
+            raise HTTPException(status_code=404, detail="Position not found")
+        return pos
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca position: {str(e)[:200]}")
+
+
+@app.get("/v1/orders")
+async def list_paper_orders(
+    status: str | None = Query(None, description="open, closed, all"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    """Paper orders from Alpaca, enriched with order_origin and order_intent from DB when present."""
+    import asyncio
+    client = _alpaca_client_or_503()
+    try:
+        orders = await asyncio.to_thread(
+            client.list_orders,
+            status=status or "all",
+            limit=limit,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca orders: {str(e)[:200]}")
+    order_ids = [str(o.get("id")) for o in orders if o.get("id")]
+    origin_map: dict[str, tuple[str | None, str | None]] = {}
+    if order_ids:
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                select(PaperOrder.order_id, PaperOrder.order_origin, PaperOrder.order_intent).where(
+                    PaperOrder.order_id.in_(order_ids)
+                )
+            )
+            for row in result.all():
+                origin_map[str(row.order_id)] = (row.order_origin, row.order_intent)
+    for o in orders:
+        oid = str(o.get("id")) if o.get("id") else None
+        if oid and oid in origin_map:
+            origin, intent = origin_map[oid]
+            o["order_origin"] = origin
+            o["order_intent"] = intent
+        else:
+            o["order_origin"] = None
+            o["order_intent"] = None
+    return {"orders": orders, "count": len(orders)}
+
+
+@app.get("/v1/orders/{order_id}")
+def get_paper_order(order_id: str) -> dict:
+    """Single paper order by ID."""
+    client = _alpaca_client_or_503()
+    try:
+        order = client.get_order(order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        return order
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca order: {str(e)[:200]}")
+
+
+@app.get("/v1/clock")
+def get_market_clock() -> dict:
+    """Market clock: is_open, next_open, next_close."""
+    client = _alpaca_client_or_503()
+    try:
+        return client.get_clock()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca clock: {str(e)[:200]}")
+
+
+@app.get("/v1/calendar")
+def get_calendar(
+    start: str | None = Query(None, description="YYYY-MM-DD"),
+    end: str | None = Query(None, description="YYYY-MM-DD"),
+) -> dict:
+    """Trading calendar."""
+    client = _alpaca_client_or_503()
+    try:
+        days = client.get_calendar(start=start, end=end)
+        return {"calendar": days, "count": len(days)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca calendar: {str(e)[:200]}")
+
+
+@app.get("/v1/movers")
+def get_movers(
+    top: int = Query(default=10, ge=1, le=50, description="Number of top gainers and losers each"),
+    market_type: str = Query(default="stocks", description="stocks or crypto"),
+) -> dict:
+    """Top market movers (gainers/losers) from Alpaca screener. One discovery input for scanner; resets at market open for stocks."""
+    client = _alpaca_client_or_503()
+    try:
+        return client.get_movers(market_type=market_type, top=top)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca movers: {str(e)[:200]}")
+
+
+@app.get("/v1/assets")
+def list_assets(
+    status: str = Query("active", description="active or inactive"),
+    asset_class: str = Query("us_equity", description="us_equity etc"),
+    tradable_only: bool = Query(True, description="if true, return only assets with tradable=true"),
+    shortable_only: bool = Query(False, description="if true, return only shortable assets (playbook: check borrow daily)"),
+    fractionable_only: bool = Query(False, description="if true, return only fractionable assets"),
+) -> dict:
+    """Asset master from Alpaca. Use daily for tradable/shortable/fractionable; playbook recommends checking borrow status for shorts."""
+    client = _alpaca_client_or_503()
+    try:
+        assets = client.get_assets(status=status, asset_class=asset_class)
+        if tradable_only:
+            assets = [a for a in assets if a.get("tradable") is True]
+        if shortable_only:
+            assets = [a for a in assets if a.get("shortable") is True]
+        if fractionable_only:
+            assets = [a for a in assets if a.get("fractionable") is True]
+        return {"assets": assets, "count": len(assets)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca assets: {str(e)[:200]}")
+
+
+@app.get("/v1/portfolio/history")
+def get_portfolio_history(
+    period: str | None = Query(None, description="1D, 1W, 1M, 1A"),
+    timeframe: str | None = Query(None, description="1Min, 5Min, 15Min, 1H, 1D"),
+    date_end: str | None = Query(None),
+) -> dict:
+    """Account equity and P/L time series."""
+    client = _alpaca_client_or_503()
+    try:
+        return client.get_portfolio_history(period=period, timeframe=timeframe, date_end=date_end)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca portfolio history: {str(e)[:200]}")
+
+
+@app.get("/v1/account/activities")
+def list_activities(
+    activity_types: str | None = Query(None),
+    date: str | None = Query(None),
+    page_size: int = Query(50, ge=1, le=100),
+    page_token: str | None = Query(None),
+) -> dict:
+    """Account activities: fills, cash, fees, dividends, etc."""
+    client = _alpaca_client_or_503()
+    try:
+        activities, next_token = client.get_activities(
+            activity_types=activity_types, date=date, page_size=page_size, page_token=page_token
+        )
+        return {"activities": activities, "next_page_token": next_token, "count": len(activities)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca activities: {str(e)[:200]}")
+
+
+@app.get("/v1/account/history")
+async def get_account_history(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """Account snapshot history from reconciler (paper_account_snapshots)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(PaperAccountSnapshot)
+            .order_by(PaperAccountSnapshot.snapshot_ts.desc())
+            .limit(limit)
+        )
+        rows = result.scalars().all()
+    return {
+        "snapshots": [
+            {
+                "snapshot_ts": r.snapshot_ts.isoformat() if r.snapshot_ts else None,
+                "equity": float(r.equity) if r.equity else None,
+                "cash": float(r.cash) if r.cash else None,
+                "buying_power": float(r.buying_power) if r.buying_power else None,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/trades/paper")
+async def list_paper_trades(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    """Paper fills from canonical ledger (trade_updates)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(Fill).where(Fill.alpaca_order_id.isnot(None)).order_by(Fill.created_at.desc()).limit(limit)
+        )
+        fills = result.scalars().all()
+    return {
+        "trades": [
+            {
+                "signal_uuid": str(f.signal_uuid),
+                "client_order_id": f.client_order_id,
+                "alpaca_order_id": f.alpaca_order_id,
+                "symbol": f.symbol,
+                "side": f.side,
+                "qty": float(f.qty) if f.qty else None,
+                "avg_fill_price": float(f.avg_fill_price) if f.avg_fill_price else None,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in fills
+        ],
+        "count": len(fills),
+    }
+
+
+@app.get("/v1/portfolio/compare-books")
+async def portfolio_compare_books() -> dict:
+    """Paper vs shadow summary: honest counts and PnL; null if not available."""
+    factory = get_session_factory()
+    async with factory() as session:
+        shadow_count = (await session.execute(select(func.count(ShadowTrade.id)))).scalar() or 0
+        shadow_pnl = float((await session.execute(select(func.sum(ShadowTrade.net_pnl)))).scalar() or 0)
+        paper_count = (await session.execute(select(func.count(Fill.id)).where(Fill.alpaca_order_id.isnot(None)))).scalar() or 0
+    return {
+        "shadow": {"trade_count": shadow_count, "total_net_pnl": round(shadow_pnl, 2)},
+        "paper": {"fill_count": paper_count, "total_net_pnl": None},
+        "note": "Paper PnL from broker; use GET /v1/account and positions for live truth.",
+    }
+
+
+# ---------- Paper execution test (operator/debug only) ----------
+
+
+@app.get("/v1/paper/test/status")
+async def paper_test_status() -> dict:
+    """Operator status: paper enabled, account tradable, buying power, positions, recent test orders, warnings."""
+    try:
+        return await get_paper_test_status()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e)[:200])
+
+
+@app.get("/v1/paper/test/proof")
+async def paper_test_proof() -> dict:
+    """Last operator-test order per intent (buy_open, sell_close, short_open, buy_cover) to prove all four flows ran."""
+    factory = get_session_factory()
+    intents = ("buy_open", "sell_close", "short_open", "buy_cover")
+    out: dict[str, dict | None] = {i: None for i in intents}
+    async with factory() as session:
+        # Last row per order_intent where order_origin = operator_test
+        result = await session.execute(
+            select(PaperOrder)
+            .where(
+                PaperOrder.order_origin == "operator_test",
+                PaperOrder.order_intent.in_(intents),
+            )
+            .order_by(PaperOrder.submitted_at.desc().nullslast(), PaperOrder.updated_at.desc().nullslast())
+        )
+        rows = result.scalars().all()
+    # Keep only the most recent per intent
+    for row in rows:
+        if row.order_intent and row.order_intent in out and out[row.order_intent] is None:
+            out[row.order_intent] = {
+                "order_id": row.order_id,
+                "client_order_id": row.client_order_id,
+                "symbol": row.symbol,
+                "side": row.side,
+                "qty": float(row.qty) if row.qty else None,
+                "status": row.status,
+                "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                "filled_qty": float(row.filled_qty) if row.filled_qty else None,
+                "filled_avg_price": float(row.filled_avg_price) if row.filled_avg_price else None,
+                "order_intent": row.order_intent,
+            }
+    return {"proof": out, "intents": intents}
+
+
+@app.post("/v1/paper/test/buy-open")
+async def paper_test_buy_open(
+    symbol: str = Body(..., embed=True),
+    qty: float = Body(..., embed=True),
+    order_type: str = Body("market", embed=True),
+    limit_price: float | None = Body(None, embed=True),
+    extended_hours: bool = Body(False, embed=True),
+    note: str | None = Body(None, embed=True),
+) -> dict:
+    """Operator test: BUY to open long. Not strategy authority."""
+    out = await run_buy_open(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
+    out["_operator_only"] = True
+    return out
+
+
+@app.post("/v1/paper/test/sell-close")
+async def paper_test_sell_close(
+    symbol: str = Body(..., embed=True),
+    qty: float = Body(..., embed=True),
+    order_type: str = Body("market", embed=True),
+    limit_price: float | None = Body(None, embed=True),
+    extended_hours: bool = Body(False, embed=True),
+    note: str | None = Body(None, embed=True),
+) -> dict:
+    """Operator test: SELL to close long. Not strategy authority."""
+    out = await run_sell_close(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
+    out["_operator_only"] = True
+    return out
+
+
+@app.post("/v1/paper/test/short-open")
+async def paper_test_short_open(
+    symbol: str = Body(..., embed=True),
+    qty: float = Body(..., embed=True),
+    order_type: str = Body("market", embed=True),
+    limit_price: float | None = Body(None, embed=True),
+    extended_hours: bool = Body(False, embed=True),
+    note: str | None = Body(None, embed=True),
+) -> dict:
+    """Operator test: SELL to open short. Not strategy authority."""
+    out = await run_short_open(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
+    out["_operator_only"] = True
+    return out
+
+
+@app.post("/v1/paper/test/buy-cover")
+async def paper_test_buy_cover(
+    symbol: str = Body(..., embed=True),
+    qty: float = Body(..., embed=True),
+    order_type: str = Body("market", embed=True),
+    limit_price: float | None = Body(None, embed=True),
+    extended_hours: bool = Body(False, embed=True),
+    note: str | None = Body(None, embed=True),
+) -> dict:
+    """Operator test: BUY to cover short. Not strategy authority."""
+    out = await run_buy_cover(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
+    out["_operator_only"] = True
+    return out
+
+
+@app.post("/v1/paper/test/flatten-all")
+async def paper_test_flatten_all(note: str | None = Body(None, embed=True)) -> dict:
+    """Operator test: market close all positions. Not strategy authority."""
+    out = await run_flatten_all(note=note)
+    out["_operator_only"] = True
+    return out
+
+
+@app.post("/v1/paper/test/cancel-all")
+async def paper_test_cancel_all() -> dict:
+    """Operator test: cancel all open orders."""
+    out = await run_cancel_all()
+    out["_operator_only"] = True
+    return out
+
+
+@app.get("/v1/metrics/summary")
+async def metrics_summary(
+    scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+) -> dict:
+    """Summary: signal count, shadow trade count, total net PnL, Scrappy attribution; optionally filtered by scrappy_mode."""
+    factory = get_session_factory()
+    async with factory() as session:
+        q_sig = select(func.count(Signal.id))
+        q_trade = select(func.count(ShadowTrade.id))
+        q_pnl = select(func.sum(ShadowTrade.net_pnl))
+        q_with_snap = select(func.count(Signal.id)).where(Signal.intelligence_snapshot_id.isnot(None))
+        if scrappy_mode is not None:
+            q_sig = q_sig.where(Signal.scrappy_mode == scrappy_mode)
+            q_trade = q_trade.where(ShadowTrade.scrappy_mode == scrappy_mode)
+            q_pnl = q_pnl.where(ShadowTrade.scrappy_mode == scrappy_mode)
+            q_with_snap = q_with_snap.where(Signal.scrappy_mode == scrappy_mode)
+        sig_count = (await session.execute(q_sig)).scalar() or 0
+        trade_count = (await session.execute(q_trade)).scalar() or 0
+        total_net_pnl = float((await session.execute(q_pnl)).scalar() or 0)
+        with_snapshot = (await session.execute(q_with_snap)).scalar() or 0
+        without_snapshot = sig_count - with_snapshot
+        rejection_counts = await get_gate_rejection_counts(session, scrappy_mode=scrappy_mode)
+    out = {
+        "signals_total": sig_count,
+        "shadow_trades_total": trade_count,
+        "total_net_pnl_shadow": round(total_net_pnl, 2),
+        "signals_with_scrappy_snapshot": with_snapshot,
+        "signals_without_scrappy_snapshot": without_snapshot,
+        "scrappy_gate_rejections": rejection_counts,
+    }
+    if scrappy_mode is not None:
+        out["scrappy_mode_filter"] = scrappy_mode
+    return out
+
+
+@app.get("/v1/metrics/compare-scrappy-modes")
+async def metrics_compare_scrappy_modes() -> dict:
+    """Metrics segmented by scrappy_mode for staging comparison (advisory vs required)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        rejection_by_mode = await get_gate_rejection_counts_by_mode(session)
+        # Per-mode signal count, shadow trade count, net PnL
+        modes = ["advisory", "required", "off"]
+        segments: dict[str, dict] = {}
+        for mode in modes:
+            q_sig = select(func.count(Signal.id)).where(Signal.scrappy_mode == mode)
+            q_trade = select(func.count(ShadowTrade.id)).where(ShadowTrade.scrappy_mode == mode)
+            q_pnl = select(func.sum(ShadowTrade.net_pnl)).where(ShadowTrade.scrappy_mode == mode)
+            sig_count = (await session.execute(q_sig)).scalar() or 0
+            trade_count = (await session.execute(q_trade)).scalar() or 0
+            total_pnl = float((await session.execute(q_pnl)).scalar() or 0)
+            segments[mode] = {
+                "signals_total": sig_count,
+                "shadow_trades_total": trade_count,
+                "total_net_pnl_shadow": round(total_pnl, 2),
+                "scrappy_gate_rejections": rejection_by_mode.get(mode, {}),
+            }
+        # Unknown/null mode
+        q_sig_u = select(func.count(Signal.id)).where(Signal.scrappy_mode.is_(None))
+        q_trade_u = select(func.count(ShadowTrade.id)).where(ShadowTrade.scrappy_mode.is_(None))
+        q_pnl_u = select(func.sum(ShadowTrade.net_pnl)).where(ShadowTrade.scrappy_mode.is_(None))
+        segments["unknown"] = {
+            "signals_total": (await session.execute(q_sig_u)).scalar() or 0,
+            "shadow_trades_total": (await session.execute(q_trade_u)).scalar() or 0,
+            "total_net_pnl_shadow": round(float((await session.execute(q_pnl_u)).scalar() or 0), 2),
+            "scrappy_gate_rejections": rejection_by_mode.get("unknown", {}),
+        }
+    return {
+        "by_scrappy_mode": segments,
+        "note": "Sample size may be too small for statistical comparison; run staging passes with same universe and time window.",
+    }
+
+
+@app.get("/v1/ai-referee/recent")
+async def ai_referee_recent(
+    symbol: str | None = Query(None, max_length=32),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Recent AI referee assessments, optionally by symbol."""
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = await list_recent_assessments(session, symbol=symbol, limit=limit)
+    return {
+        "assessments": [_referee_assessment_to_dict(r) for r in rows],
+        "count": len(rows),
+        "symbol_filter": symbol,
+    }
+
+
+@app.get("/v1/ai-referee/{assessment_id}")
+async def ai_referee_get(assessment_id: str) -> dict:
+    """Single assessment by assessment_id (UUID string)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        a = await get_assessment_by_id(session, assessment_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="not_found")
+    out = _referee_assessment_to_dict(a) or {}
+    if getattr(a, "raw_response_json", None):
+        out["raw_response_json"] = a.raw_response_json
+    return out
+
+
+@app.get("/v1/metrics/compare-ai-referee")
+async def metrics_compare_ai_referee() -> dict:
+    """Metrics: signals/trades with vs without AI referee; decision_class counts."""
+    factory = get_session_factory()
+    async with factory() as session:
+        decision_counts = await aggregate_decision_counts(session)
+        assisted = await aggregate_assisted_vs_unassisted_metrics(session)
+    return {
+        "by_decision_class": decision_counts,
+        "signals_with_referee": assisted.get("signals_with_referee", 0),
+        "signals_without_referee": assisted.get("signals_without_referee", 0),
+        "signals_total": assisted.get("signals_total", 0),
+        "note": "Sample size may be too small for statistical comparison.",
+    }
+
+
+@app.get("/v1/system/health")
+async def system_health() -> dict:
+    """Alias for /health/detail: API, DB, Redis, worker, gateway status."""
+    return await health_detail()
+
+
+@app.get("/v1/system/reconciliation")
+async def system_reconciliation() -> dict:
+    """Latest reconciliation run: orders/positions matched vs mismatch."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(ReconciliationLog).order_by(ReconciliationLog.run_at.desc()).limit(1)
+        )
+        row = result.scalars().first()
+    if not row:
+        return {"status": "no_runs", "orders_matched": 0, "orders_mismatch": 0, "positions_matched": 0, "positions_mismatch": 0}
+    return {
+        "status": "ok",
+        "run_at": row.run_at.isoformat() if row.run_at else None,
+        "orders_matched": row.orders_matched,
+        "orders_mismatch": row.orders_mismatch,
+        "positions_matched": row.positions_matched,
+        "positions_mismatch": row.positions_mismatch,
+        "details": row.details,
+    }
+
+
+@app.post("/v1/scanner/run/now")
+async def scanner_run_now() -> dict:
+    """Manual trigger: run one live scanner cycle (and opportunity merge if enabled). Returns run_id and mode."""
+    from stockbot.scanner.main import run_scan_and_publish, _get_watchlist_from_db
+    try:
+        result = await run_scan_and_publish(get_watchlist_fn=_get_watchlist_from_db)
+        return {
+            "status": "completed",
+            "run_id": result.run_id,
+            "mode": result.mode or "dynamic",
+            "top_count": result.top_candidates_count,
+        }
+    except Exception as e:
+        logger.exception("scanner run/now failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/v1/opportunities/run/now")
+async def opportunities_run_now() -> dict:
+    """Manual trigger: re-blend from latest live scanner run (no new scan). Returns run_id and top_count."""
+    from stockbot.opportunities.service import run_opportunity_merge_from_latest_scanner
+    try:
+        symbols = await run_opportunity_merge_from_latest_scanner()
+        if symbols is not None:
+            return {"status": "completed", "top_count": len(symbols), "run_id": "see latest opportunity run"}
+        return {"status": "no_live_scanner_run", "reason": "no_live_scanner_run", "top_count": 0}
+    except Exception as e:
+        logger.exception("opportunities run/now failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/v1/scrappy/auto-run/now")
+async def scrappy_auto_run_now() -> dict:
+    """Manual trigger: run one Scrappy auto cycle on live top symbols. Returns run_id if run executed."""
+    from stockbot.scrappy.auto_runner import run_scrappy_auto_once
+    try:
+        result = await run_scrappy_auto_once()
+        if result:
+            return {"status": "completed", "run_id": result.get("run_id", "")[:16], "outcome": result.get("outcome_code", "")}
+        return {"status": "skipped", "reason": "no_symbols_or_session"}
+    except Exception as e:
+        logger.exception("scrappy auto-run/now failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/v1/system/reconcile-now")
+async def system_reconcile_now() -> dict:
+    """Manual trigger: run one reconciliation cycle (Alpaca account/positions/orders). Operator/debug only."""
+    import asyncio
+    from stockbot.gateways.reconciler import run_reconciliation
+    asyncio.create_task(run_reconciliation())
+    return {"status": "accepted", "message": "reconciliation started in background"}
+
+
+@app.post("/v1/backtests/run")
+async def backtests_run(
+    strategy_id: str = Query(default="INTRA_EVENT_MOMO"),
+    strategy_version: str = Query(default="0.1.0"),
+    symbols: str = Query(default="AAPL,SPY", description="Comma-separated"),
+    start: str = Query(..., description="YYYY-MM-DD or ISO"),
+    end: str | None = Query(None, description="YYYY-MM-DD or ISO"),
+    feed: str = Query(default="iex"),
+) -> dict:
+    """Run historical backtest over Alpaca bars; returns run_id."""
+    import asyncio
+    from stockbot.research.backtest import run_backtest
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        raise HTTPException(status_code=400, detail="symbols required")
+    try:
+        run_id = await asyncio.to_thread(
+            run_backtest,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            symbols=sym_list,
+            start=start,
+            end=end,
+            feed=feed,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    return {"run_id": run_id, "status": "completed"}
+
+
+@app.get("/v1/backtests")
+async def list_backtests(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """List recent backtest runs."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(limit)
+        )
+        rows = result.scalars().all()
+    return {
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "strategy_id": r.strategy_id,
+                "strategy_version": r.strategy_version,
+                "start_ts": r.start_ts.isoformat() if r.start_ts else None,
+                "end_ts": r.end_ts.isoformat() if r.end_ts else None,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/backtests/{run_id}")
+async def get_backtest(run_id: str) -> dict:
+    """Single backtest run metadata."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(select(BacktestRun).where(BacktestRun.run_id == run_id).limit(1))
+        r = result.scalars().first()
+    if not r:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {
+        "run_id": r.run_id,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "strategy_id": r.strategy_id,
+        "strategy_version": r.strategy_version,
+        "symbols_json": r.symbols_json,
+        "start_ts": r.start_ts.isoformat() if r.start_ts else None,
+        "end_ts": r.end_ts.isoformat() if r.end_ts else None,
+        "feed": r.feed,
+        "scrappy_mode": r.scrappy_mode,
+        "ai_referee_mode": r.ai_referee_mode,
+        "status": r.status,
+        "notes": r.notes,
+    }
+
+
+@app.get("/v1/backtests/{run_id}/trades")
+async def get_backtest_trades(run_id: str) -> dict:
+    """Backtest trades for run."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(select(BacktestTrade).where(BacktestTrade.run_id == run_id).order_by(BacktestTrade.entry_ts))
+        rows = result.scalars().all()
+    return {
+        "trades": [
+            {
+                "symbol": t.symbol,
+                "side": t.side,
+                "entry_ts": t.entry_ts.isoformat() if t.entry_ts else None,
+                "exit_ts": t.exit_ts.isoformat() if t.exit_ts else None,
+                "entry_price": float(t.entry_price) if t.entry_price else None,
+                "exit_price": float(t.exit_price) if t.exit_price else None,
+                "qty": float(t.qty) if t.qty else None,
+                "gross_pnl": float(t.gross_pnl) if t.gross_pnl else None,
+                "net_pnl": float(t.net_pnl) if t.net_pnl else None,
+                "exit_reason": t.exit_reason,
+            }
+            for t in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/backtests/{run_id}/summary")
+async def get_backtest_summary(run_id: str) -> dict:
+    """Backtest summary for run."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(select(BacktestSummary).where(BacktestSummary.run_id == run_id).limit(1))
+        s = result.scalars().first()
+    if not s:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {
+        "run_id": s.run_id,
+        "signal_count": s.signal_count,
+        "trade_count": s.trade_count,
+        "win_rate": float(s.win_rate) if s.win_rate else None,
+        "avg_return_per_trade": float(s.avg_return_per_trade) if s.avg_return_per_trade else None,
+        "expectancy": float(s.expectancy) if s.expectancy else None,
+        "gross_pnl": float(s.gross_pnl) if s.gross_pnl else None,
+        "net_pnl": float(s.net_pnl) if s.net_pnl else None,
+        "max_drawdown": float(s.max_drawdown) if s.max_drawdown else None,
+        "regime_label": s.regime_label,
+        "rejection_counts_json": s.rejection_counts_json,
+    }
+
+
+# ---------- Scanner / opportunities ----------
+
+
+@app.get("/v1/scanner/runs")
+async def list_scanner_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    status: str | None = Query(None, description="Filter by status"),
+) -> dict:
+    """List recent scanner runs."""
+    factory = get_session_factory()
+    async with factory() as session:
+        runs = await get_scanner_runs(session, limit=limit, status=status)
+    return {
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "run_ts": r.run_ts.isoformat() if r.run_ts else None,
+                "mode": r.mode,
+                "universe_mode": r.universe_mode,
+                "universe_size": r.universe_size,
+                "candidates_scored": r.candidates_scored,
+                "top_candidates_count": r.top_candidates_count,
+                "market_session": r.market_session,
+                "status": r.status,
+                "notes": r.notes,
+            }
+            for r in runs
+        ],
+        "count": len(runs),
+    }
+
+
+@app.get("/v1/scanner/runs/{run_id}")
+async def get_scanner_run(run_id: str) -> dict:
+    """Scanner run by ID."""
+    factory = get_session_factory()
+    async with factory() as session:
+        r = await get_scanner_run_by_id(session, run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {
+        "run_id": r.run_id,
+        "run_ts": r.run_ts.isoformat() if r.run_ts else None,
+        "mode": r.mode,
+        "universe_mode": r.universe_mode,
+        "universe_size": r.universe_size,
+        "candidates_scored": r.candidates_scored,
+        "top_candidates_count": r.top_candidates_count,
+        "market_session": r.market_session,
+        "status": r.status,
+        "notes": r.notes,
+    }
+
+
+@app.get("/v1/scanner/candidates")
+async def list_scanner_candidates(
+    status: str | None = Query(None, description="top_candidate | filtered_out"),
+    run_id: str | None = Query(None, description="Filter by run_id"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """Candidates for latest run or specified run_id."""
+    factory = get_session_factory()
+    async with factory() as session:
+        if run_id:
+            r = await get_scanner_run_by_id(session, run_id)
+            if not r:
+                raise HTTPException(status_code=404, detail="run not found")
+            run_id_val = run_id
+        else:
+            latest = await get_scanner_runs(session, limit=1)
+            if not latest:
+                return {"candidates": [], "count": 0, "run_id": None}
+            run_id_val = latest[0].run_id
+        rows = await get_candidates_for_run(session, run_id_val, status=status, limit=limit)
+    return {
+        "candidates": [_row_to_candidate(r) for r in rows],
+        "count": len(rows),
+        "run_id": run_id_val,
+    }
+
+
+@app.get("/v1/scanner/top")
+async def get_scanner_top() -> dict:
+    """Latest live top-candidate list (symbols + run_id). Never returns historical (hist_*) runs."""
+    factory = get_session_factory()
+    async with factory() as session:
+        snap = await get_latest_live_toplist_snapshot(session)
+    if not snap:
+        return {
+            "symbols": [],
+            "run_id": None,
+            "snapshot_ts": None,
+            "source": "none",
+            "reason": "no_live_scanner_run",
+        }
+    return {
+        "symbols": snap.symbols_json or [],
+        "run_id": snap.run_id,
+        "snapshot_ts": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
+    }
+
+
+@app.get("/v1/scanner/symbol/{symbol}")
+async def get_scanner_symbol(symbol: str) -> dict:
+    """Latest candidate row for symbol (any run)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        r = await session.execute(
+            select(ScannerCandidateRow)
+            .where(ScannerCandidateRow.symbol == symbol.upper())
+            .order_by(ScannerCandidateRow.created_at.desc())
+            .limit(1)
+        )
+        row = r.scalars().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    return _row_to_candidate(row)
+
+
+@app.get("/v1/scanner/summary")
+async def get_scanner_summary() -> dict:
+    """Scanner health: last live run, top count, rejection reasons. Excludes historical runs."""
+    factory = get_session_factory()
+    async with factory() as session:
+        live_run = await get_latest_live_scanner_run(session)
+        snap = await get_latest_live_toplist_snapshot(session)
+        candidates = (
+            await get_candidates_for_run(session, live_run.run_id, status="filtered_out", limit=200)
+            if live_run else []
+        )
+    filter_reason_counts: dict[str, int] = {}
+    for c in candidates:
+        for reason in (c.filter_reasons_json or []):
+            filter_reason_counts[reason] = filter_reason_counts.get(reason, 0) + 1
+    return {
+        "last_run_id": live_run.run_id if live_run else None,
+        "last_run_ts": live_run.run_ts.isoformat() if live_run and live_run.run_ts else None,
+        "last_run_status": live_run.status if live_run else None,
+        "top_count": len(snap.symbols_json) if snap and snap.symbols_json else 0,
+        "rejection_reasons": filter_reason_counts,
+    }
+
+
+@app.get("/v1/opportunities/now")
+async def get_opportunities_now() -> dict:
+    """Top current candidates (live only). Prefers opportunity engine; includes Scrappy enrichment when present."""
+    from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+    run_id, updated_at, candidates = await get_latest_opportunity_run_and_candidates()
+    if run_id and candidates:
+        opportunities = []
+        scrappy_symbols = [c["symbol"] for c in candidates if c.get("scrappy_present")]
+        snapshot_map: dict[str, SymbolIntelligenceSnapshot] = {}
+        factory = get_session_factory()
+        async with factory() as session:
+            snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
+        for c in candidates:
+            base = {
+                "symbol": c["symbol"],
+                "rank": c["rank"],
+                "total_score": c["total_score"],
+                "market_score": c.get("market_score"),
+                "semantic_score": c.get("semantic_score"),
+                "candidate_source": c.get("candidate_source"),
+                "inclusion_reasons": c.get("inclusion_reasons") or [],
+                "component_scores": {},
+                "reason_codes": c.get("inclusion_reasons") or [],
+                "price": None,
+                "gap_pct": None,
+                "spread_bps": None,
+                "scrappy_present": c.get("scrappy_present", False),
+            }
+            snap = snapshot_map.get((c["symbol"] or "").strip())
+            if snap:
+                base.update(_snapshot_to_scrappy_enrichment(snap))
+            opportunities.append(base)
+        return {"opportunities": opportunities, "run_id": run_id, "updated_at": updated_at}
+    factory = get_session_factory()
+    async with factory() as session:
+        top_snap = await get_latest_live_toplist_snapshot(session)
+        if not top_snap or not top_snap.run_id:
+            return {
+                "opportunities": [],
+                "run_id": None,
+                "updated_at": None,
+                "source": "none",
+                "reason": "no_live_scanner_run",
+            }
+        candidates = await get_candidates_for_run(
+            session, top_snap.run_id, status="top_candidate", limit=50
+        )
+        scrappy_symbols = [c.symbol for c in candidates if c.scrappy_present]
+        snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
+    opportunities = []
+    for c in candidates:
+        base = {
+            "symbol": c.symbol,
+            "rank": c.rank,
+            "total_score": c.total_score,
+            "market_score": None,
+            "semantic_score": None,
+            "candidate_source": "market",
+            "component_scores": c.component_scores_json or {},
+            "reason_codes": c.reason_codes_json or [],
+            "inclusion_reasons": c.reason_codes_json or [],
+            "price": float(c.price) if c.price else None,
+            "gap_pct": c.gap_pct,
+            "spread_bps": c.spread_bps,
+            "scrappy_present": c.scrappy_present or False,
+        }
+        snap = snapshot_map.get((c.symbol or "").strip())
+        if snap:
+            base.update(_snapshot_to_scrappy_enrichment(snap))
+        opportunities.append(base)
+    return {
+        "opportunities": opportunities,
+        "run_id": top_snap.run_id,
+        "updated_at": top_snap.snapshot_ts.isoformat() if top_snap.snapshot_ts else None,
+    }
+
+
+def _session_allowed_and_reason() -> tuple[str, bool, bool, str | None]:
+    """Return (session, scanner_session_allowed, opportunity_session_allowed, reason_if_blocked)."""
+    from stockbot.config import get_settings
+    from stockbot.market_sessions import current_session, session_allows_scanner
+    settings = get_settings()
+    try:
+        session = current_session()
+    except Exception:
+        session = "unknown"
+    scanner_ok = session_allows_scanner(
+        session,
+        premarket_ok=getattr(settings, "scanner_premarket_enabled", False),
+        regular_ok=getattr(settings, "scanner_regular_hours_enabled", True),
+        afterhours_ok=getattr(settings, "scanner_after_hours_enabled", False),
+        overnight_ok=getattr(settings, "scanner_overnight_enabled", False),
+    )
+    reason = None if scanner_ok else f"scanning_disabled_in_{session}"
+    return (session, scanner_ok, scanner_ok, reason)
+
+
+@app.get("/v1/opportunities/summary")
+async def get_opportunities_summary() -> dict:
+    """Summary of latest live opportunity run. Never returns historical (hist_*) run_id."""
+    from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+    session, scanner_ok, opportunity_ok, reason_if_blocked = _session_allowed_and_reason()
+    run_id, updated_at, candidates = await get_latest_opportunity_run_and_candidates()
+    base = {
+        "session": session,
+        "scanner_session_allowed": scanner_ok,
+        "opportunity_session_allowed": opportunity_ok,
+        "reason_if_blocked": reason_if_blocked,
+    }
+    if run_id:
+        top_scrappy_count = sum(1 for c in candidates if c.get("scrappy_present"))
+        return {
+            **base,
+            "run_id": run_id,
+            "updated_at": updated_at,
+            "top_count": len(candidates),
+            "top_scrappy_count": top_scrappy_count,
+            "source": "opportunity_engine",
+        }
+    factory = get_session_factory()
+    async with factory() as session:
+        snap = await get_latest_live_toplist_snapshot(session)
+        if not snap:
+            return {
+                **base,
+                "run_id": None,
+                "updated_at": None,
+                "top_count": 0,
+                "top_scrappy_count": 0,
+                "source": "none",
+                "reason": "no_live_scanner_run",
+            }
+        candidates_scanner = await get_candidates_for_run(
+            session, snap.run_id, status="top_candidate", limit=500
+        )
+        top_scrappy_count = sum(1 for c in candidates_scanner if c.scrappy_present)
+        return {
+            **base,
+            "run_id": snap.run_id,
+            "updated_at": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
+            "top_count": len(snap.symbols_json) if snap.symbols_json else 0,
+            "top_scrappy_count": top_scrappy_count,
+            "source": "scanner",
+        }
+
+
+@app.get("/v1/opportunities/session")
+async def get_opportunities_session() -> dict:
+    """Current market session (overnight, premarket, regular, afterhours, closed)."""
+    from stockbot.market_sessions import current_session
+    return {"session": current_session()}
+
+
+@app.get("/v1/opportunities/symbol/{symbol}")
+async def get_opportunities_symbol(symbol: str) -> dict:
+    """Latest opportunity candidate for symbol (from latest opportunity run); includes Scrappy enrichment when present."""
+    sym = symbol.upper().strip()
+    factory = get_session_factory()
+    row = None
+    async with factory() as session:
+        r = await session.execute(
+            select(OpportunityCandidateRow)
+            .where(OpportunityCandidateRow.symbol == sym)
+            .order_by(OpportunityCandidateRow.run_id.desc())
+            .limit(1)
+        )
+        row = r.scalars().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="not_found")
+        out = {
+            "symbol": row.symbol,
+            "run_id": row.run_id,
+            "rank": row.rank,
+            "total_score": row.total_score,
+            "market_score": row.market_score,
+            "semantic_score": row.semantic_score,
+            "candidate_source": row.candidate_source,
+            "inclusion_reasons": row.inclusion_reasons_json or [],
+            "filter_reasons": row.filter_reasons_json or [],
+            "session": row.session,
+            "news_count": row.news_count,
+            "scrappy_present": row.scrappy_present,
+        }
+        if row.scrappy_present:
+            snap = await get_latest_snapshot_by_symbol(session, sym)
+            if snap:
+                out.update(_snapshot_to_scrappy_enrichment(snap))
+    return out
+
+
+@app.get("/v1/scrappy/status")
+async def get_scrappy_status() -> dict:
+    """Scrappy automation status: last auto-run, watchlist size, auto-enabled."""
+    from stockbot.config import get_settings
+    from stockbot.scrappy.run_service import get_watchlist_symbols_list
+    settings = get_settings()
+    auto_enabled = getattr(settings, "scrappy_auto_enabled", True)
+    watchlist = await get_watchlist_symbols_list()
+    factory = get_session_factory()
+    async with factory() as session:
+        r = await session.execute(
+            select(ScrappyAutoRun).order_by(ScrappyAutoRun.run_ts.desc()).limit(1)
+        )
+        last_auto = r.scalars().first()
+    return {
+        "scrappy_auto_enabled": auto_enabled,
+        "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
+        "last_run_id": last_auto.run_id if last_auto else None,
+        "last_notes_created": last_auto.notes_created if last_auto else 0,
+        "last_snapshots_updated": last_auto.snapshots_updated if last_auto else 0,
+        "watchlist_size": len(watchlist) if watchlist else 0,
+    }
+
+
+@app.get("/v1/scrappy/auto-runs")
+async def get_scrappy_auto_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Recent Scrappy auto-run audit records."""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(ScrappyAutoRun)
+            .order_by(ScrappyAutoRun.run_ts.desc())
+            .limit(limit)
+        )
+        rows = list(result.scalars().all())
+    return {
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "run_ts": r.run_ts.isoformat() if r.run_ts else None,
+                "source": r.source,
+                "symbols_count": len(r.symbols_json) if r.symbols_json else 0,
+                "notes_created": r.notes_created,
+                "snapshots_updated": r.snapshots_updated,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.post("/v1/scanner/run/historical")
+async def run_historical_scanner_endpoint(
+    days: int = Query(default=30, ge=1, le=365, description="Lookback days (30 or 90)"),
+    symbols: str | None = Query(None, description="Comma-separated symbols; default from config"),
+) -> dict:
+    """Run historical scanner over past days; persist runs for research."""
+    from stockbot.research.historical_scanner import run_historical_scanner
+    sym_list = [s.strip() for s in symbols.split(",")] if symbols else None
+    try:
+        run_ids = await run_historical_scanner(lookback_days=days, symbols=sym_list)
+        return {"run_ids": run_ids, "count": len(run_ids)}
+    except Exception as e:
+        msg = str(e).strip()
+        if not msg:
+            msg = type(e).__name__
+        raise HTTPException(status_code=500, detail=msg[:500])
+
+
+@app.get("/v1/opportunities/history")
+async def get_opportunities_history(
+    symbol: str | None = Query(None),
+    days: int = Query(default=30, ge=1, le=365),
+) -> dict:
+    """Historical candidate appearances for a symbol (for research)."""
+    from datetime import timedelta
+    from datetime import UTC, datetime
+    factory = get_session_factory()
+    if not symbol:
+        return {"symbol": None, "days": days, "appearances": [], "count": 0}
+    async with factory() as session:
+        q = (
+            select(ScannerCandidateRow)
+            .where(ScannerCandidateRow.symbol == symbol.upper())
+            .order_by(ScannerCandidateRow.created_at.desc())
+            .limit(200)
+        )
+        result = await session.execute(q)
+        rows = list(result.scalars().all())
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    filtered = [r for r in rows if r.created_at and r.created_at >= cutoff]
+    return {
+        "symbol": symbol,
+        "days": days,
+        "appearances": [
+            {"run_id": r.run_id, "rank": r.rank, "total_score": r.total_score, "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in filtered[:50]
+        ],
+        "count": len(filtered),
+    }
+
+
+@app.post("/v1/signals")
+async def create_signal_manual(
+    symbol: str, side: str, qty: float, strategy_id: str, strategy_version: str
+) -> dict:
+    """Manual/test-only: create a signal record. Does NOT place an Alpaca order."""
+    signal_uuid = uuid.uuid4()
+    return {
+        "signal_uuid": str(signal_uuid),
+        "symbol": symbol,
+        "side": side,
+        "qty": qty,
+        "note": "Manual/test-only; no order placed.",
+    }
