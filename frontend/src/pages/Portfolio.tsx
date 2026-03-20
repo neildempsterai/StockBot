@@ -395,18 +395,7 @@ export function Portfolio() {
       {compareBooks && (
         <section>
           <SectionHeader title="Compare Books" subtitle="Paper vs shadow summary" />
-          <div className="grid-cards grid-cards--4">
-            <KPICard
-              title="Shadow trades"
-              value={compareBooks.shadow?.trade_count ?? 0}
-              variant="shadow"
-            />
-            <KPICard
-              title="Shadow P&L"
-              value={compareBooks.shadow?.total_net_pnl != null ? formatPnl(compareBooks.shadow.total_net_pnl) : '—'}
-              variant="shadow"
-              valueClass={pnlClass(compareBooks.shadow?.total_net_pnl)}
-            />
+          <div className="grid-cards grid-cards--2">
             <KPICard
               title="Paper fills"
               value={compareBooks.paper?.fill_count ?? 0}
@@ -422,6 +411,9 @@ export function Portfolio() {
               {compareBooks.note}
             </p>
           )}
+          <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+            Shadow metrics shown in Shadow Book section below.
+          </p>
         </section>
       )}
 
