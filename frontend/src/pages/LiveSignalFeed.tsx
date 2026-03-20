@@ -78,8 +78,7 @@ export function LiveSignalFeed() {
       <SectionHeader title="Recent signals" subtitle="Strategy-generated signals (deterministic authority)" />
       {signals.length === 0 ? (
         <EmptyState 
-          message="No deterministic strategy signals yet" 
-          detail="This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals. Focus symbols and premarket prep appear on other pages."
+          message="No deterministic strategy signals yet. This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals. Focus symbols and premarket prep appear on other pages."
           icon="⚡" 
         />
       ) : (
