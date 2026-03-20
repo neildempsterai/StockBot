@@ -170,6 +170,9 @@ REDIS_KEY_WORKER_UNIVERSE_COUNT = "stockbot:worker:universe_count"
 REDIS_KEY_WORKER_FALLBACK_REASON = "stockbot:worker:universe_fallback_reason"
 PAPER_ARMED_REDIS_KEY = "stockbot:paper:armed"
 UNIVERSE_REFRESH_INTERVAL_SEC = 60
+# Worker rejection summary: rolling window of strategy-level rejections
+REDIS_KEY_WORKER_REJECTION_SUMMARY = "stockbot:worker:rejection_summary"
+WORKER_REJECTION_SUMMARY_TTL_SEC = 3600  # 1 hour rolling window
 
 
 async def _paper_allowed_universe(redis_client: redis.Redis) -> tuple[bool, str | None]:
@@ -806,6 +809,17 @@ async def _on_bar(
                 "candidate_rejected symbol=%s reason_code=%s",
                 symbol, eval_result.reject_reason,
             )
+            # Persist strategy-level rejection to Redis for API visibility
+            try:
+                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{eval_result.reject_reason}"
+                await redis_client.incr(rejection_key)
+                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                # Also track by symbol for detailed visibility
+                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{eval_result.reject_reason}"
+                await redis_client.incr(symbol_rejection_key)
+                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+            except Exception as e:
+                logger.debug("rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, eval_result.reject_reason, e)
         return
 
     # Scrappy gating: reject or tag
@@ -823,6 +837,16 @@ async def _on_bar(
         if reject_reason:
             await _record_rejection(reject_reason)
             logger.info("candidate_rejected symbol=%s reason_code=%s", symbol, reject_reason)
+            # Also persist Scrappy gate rejections to worker rejection summary for unified visibility
+            try:
+                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{reject_reason}"
+                await redis_client.incr(rejection_key)
+                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{reject_reason}"
+                await redis_client.incr(symbol_rejection_key)
+                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+            except Exception as e:
+                logger.debug("scrappy_rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, reject_reason, e)
             return
         direction = getattr(snapshot_row, "catalyst_direction", "neutral") if snapshot_row else "neutral"
         if snapshot_row:
@@ -897,10 +921,19 @@ async def _on_bar(
                                     await insert_gate_rejection(session, symbol, reason, scrappy_mode=scrappy_mode)
                             except Exception as e:
                                 logger.debug("ai_referee_rejection_persist_failed symbol=%s error=%s", symbol, e)
-                        await _record_ai_rejection(
-                            "ai_referee_block" if assessment.decision_class == "block" else "ai_referee_review"
-                        )
+                        ai_reject_reason = "ai_referee_block" if assessment.decision_class == "block" else "ai_referee_review"
+                        await _record_ai_rejection(ai_reject_reason)
                         logger.info("candidate_rejected symbol=%s reason_code=%s", symbol, assessment.decision_class)
+                        # Also persist AI Referee rejections to worker rejection summary
+                        try:
+                            rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{ai_reject_reason}"
+                            await redis_client.incr(rejection_key)
+                            await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                            symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{ai_reject_reason}"
+                            await redis_client.incr(symbol_rejection_key)
+                            await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                        except Exception as e:
+                            logger.debug("ai_referee_rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, ai_reject_reason, e)
                         return
                     if assessment.decision_class == "downgrade":
                         eval_result.reason_codes.append("ai_referee_downgrade")
@@ -926,6 +959,16 @@ async def _on_bar(
                     except Exception:
                         pass
                     logger.info("candidate_rejected symbol=%s reason_code=ai_referee_error", symbol)
+                    # Also persist AI Referee error rejections to worker rejection summary
+                    try:
+                        rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:ai_referee_error"
+                        await redis_client.incr(rejection_key)
+                        await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                        symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:ai_referee_error"
+                        await redis_client.incr(symbol_rejection_key)
+                        await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                    except Exception as e:
+                        logger.debug("ai_referee_error_rejection_summary_persist_failed symbol=%s error=%s", symbol, e)
                     return
                 eval_result.reason_codes.append("ai_referee_error")
         except Exception as e:

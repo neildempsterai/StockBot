@@ -54,6 +54,7 @@ export function LiveSignalFeed() {
       entry_window?: string;
       in_entry_window?: boolean;
       top_rejection_reasons?: Array<[string, number]>;
+      source?: string;
     }>(ENDPOINTS.signalsRejectionSummary),
     refetchInterval: 30_000,
   });
@@ -91,7 +92,9 @@ export function LiveSignalFeed() {
         <div>
           <EmptyState 
             message={
-              !rejectionSummary?.in_entry_window && rejectionSummary?.session && rejectionSummary.session !== 'premarket'
+              rejectionSummary?.top_rejection_reasons && rejectionSummary.top_rejection_reasons.length > 0 && rejectionSummary.top_rejection_reasons[0]?.[0] === 'outside_entry_window'
+                ? `No signals — strategy entry window is ${rejectionSummary.entry_window || '09:35-11:30 ET'}. Current session: ${rejectionSummary.session || 'unknown'}. Outside the entry window, candidates are being rejected for new entries.`
+                : !rejectionSummary?.in_entry_window && rejectionSummary?.session && rejectionSummary.session !== 'premarket'
                 ? `No signals — strategy entry window is ${rejectionSummary.entry_window || '09:35-11:30 ET'}. Current session: ${rejectionSummary.session}. Outside the entry window, candidates may be discovered but will be rejected for new entries.`
                 : rejectionSummary?.top_rejection_reasons && rejectionSummary.top_rejection_reasons.length > 0
                 ? `No signals yet. Recent rejections: ${rejectionSummary.top_rejection_reasons.map(([reason, count]) => `${reason} (${count})`).join(', ')}. This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals.`
@@ -116,6 +119,11 @@ export function LiveSignalFeed() {
                       `${reason}: ${count}`
                     ).join(', ')
                   }
+                </div>
+              )}
+              {rejectionSummary.source && (
+                <div style={{ marginTop: '0.5rem', fontSize: '0.875rem', color: 'var(--color-muted)' }}>
+                  <em>Source: {rejectionSummary.source === 'worker_runtime' ? 'Worker runtime' : rejectionSummary.source === 'fallback_db' ? 'Database (Scrappy/AI gates)' : 'None'}</em>
                 </div>
               )}
             </div>

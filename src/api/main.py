@@ -427,31 +427,16 @@ async def list_strategies() -> dict:
 
 @app.get("/v1/signals/rejection-summary")
 async def get_signals_rejection_summary() -> dict:
-    """Recent candidate rejection reasons summary for operator visibility."""
+    """Recent candidate rejection reasons summary for operator visibility.
+    Reads from worker runtime (Redis) first, falls back to DB (Scrappy/AI gate rejections) if needed.
+    """
     try:
         from datetime import UTC, datetime, timedelta
-        from stockbot.scrappy.store import get_gate_rejection_counts
-        factory = get_session_factory()
-        
-        # Get rejections from last 30 minutes
-        recent_rejections: dict[str, int] = {}
-        try:
-            async with factory() as session:
-                # Get all recent rejections (last 30 minutes)
-                cutoff = datetime.now(UTC) - timedelta(minutes=30)
-                r = await session.execute(
-                    select(ScrappyGateRejection.reason_code, func.count(ScrappyGateRejection.id))
-                    .where(ScrappyGateRejection.created_at >= cutoff)
-                    .group_by(ScrappyGateRejection.reason_code)
-                )
-                recent_rejections = {row[0]: row[1] for row in r.all()}
-        except Exception:
-            pass
-        
-        # Get current session and entry window status
         from stockbot.market_sessions import current_session
         from stockbot.config import get_settings
         from stockbot.strategies.intra_event_momo import ENTRY_START_ET, ENTRY_END_ET
+        import redis.asyncio as redis
+        
         settings = get_settings()
         session_label = current_session()
         entry_start = getattr(settings, "entry_start_et", None) or ENTRY_START_ET
@@ -468,6 +453,57 @@ async def get_signals_rejection_summary() -> dict:
         except Exception:
             in_entry_window = False
         
+        # PRIMARY SOURCE: Read worker rejection summary from Redis (strategy-level rejections)
+        recent_rejections: dict[str, int] = {}
+        source = "none"
+        try:
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            # Scan for all rejection keys: stockbot:worker:rejection_summary:REASON
+            pattern = "stockbot:worker:rejection_summary:*"
+            cursor = 0
+            rejection_keys: list[str] = []
+            while True:
+                cursor, keys = await r.scan(cursor, match=pattern, count=100)
+                rejection_keys.extend([k for k in keys if ":rejection_summary:" in k and k.count(":") == 3])
+                if cursor == 0:
+                    break
+            # Extract rejection reasons and counts (skip symbol-specific keys)
+            for key in rejection_keys:
+                # Format: stockbot:worker:rejection_summary:REASON
+                # Skip: stockbot:worker:rejection_summary:SYMBOL:REASON
+                parts = key.split(":")
+                if len(parts) == 4 and parts[3]:  # Only reason-level keys, not symbol-level
+                    reason = parts[3]
+                    count_str = await r.get(key)
+                    if count_str:
+                        try:
+                            count = int(count_str)
+                            recent_rejections[reason] = recent_rejections.get(reason, 0) + count
+                        except (ValueError, TypeError):
+                            pass
+            await r.aclose()
+            if recent_rejections:
+                source = "worker_runtime"
+        except Exception as e:
+            logger.debug("worker_rejection_summary_read_failed: %s", e)
+        
+        # FALLBACK: If no worker rejections found, read from DB (Scrappy/AI gate rejections)
+        if not recent_rejections:
+            try:
+                factory = get_session_factory()
+                async with factory() as session:
+                    cutoff = datetime.now(UTC) - timedelta(minutes=30)
+                    r = await session.execute(
+                        select(ScrappyGateRejection.reason_code, func.count(ScrappyGateRejection.id))
+                        .where(ScrappyGateRejection.created_at >= cutoff)
+                        .group_by(ScrappyGateRejection.reason_code)
+                    )
+                    recent_rejections = {row[0]: row[1] for row in r.all()}
+                if recent_rejections:
+                    source = "fallback_db"
+            except Exception as e:
+                logger.debug("db_rejection_summary_read_failed: %s", e)
+        
         result = {
             "recent_rejections": recent_rejections,
             "session": session_label,
@@ -478,6 +514,7 @@ async def get_signals_rejection_summary() -> dict:
                 key=lambda x: x[1],
                 reverse=True
             )[:5],
+            "source": source,
         }
         return _sanitize_json_value(result)
     except Exception as e:
@@ -490,6 +527,7 @@ async def get_signals_rejection_summary() -> dict:
             "entry_window": "09:35-11:30 ET",
             "in_entry_window": False,
             "top_rejection_reasons": [],
+            "source": "none",
         })
 
 
@@ -2717,7 +2755,7 @@ async def get_premarket_status() -> dict:
         try:
             r = redis.from_url(settings.redis_url, decode_responses=True)
             scanner_top_json = await r.get("stockbot:scanner:top_symbols")
-            scanner_top_ts = await r.get("stockbot:scanner:top_ts")
+            scanner_top_ts = await r.get(SCANNER_TOP_TS_KEY)  # Use consistent key: stockbot:scanner:top_updated_at
             await r.aclose()
             if scanner_top_json:
                 try:

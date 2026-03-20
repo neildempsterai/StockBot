@@ -92,6 +92,7 @@ export function CommandCenter() {
       entry_window?: string;
       in_entry_window?: boolean;
       top_rejection_reasons?: Array<[string, number]>;
+      source?: string;
     }>(ENDPOINTS.signalsRejectionSummary),
     refetchInterval: 30_000,
   });
