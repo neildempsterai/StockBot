@@ -161,6 +161,29 @@ class Settings(BaseSettings):
     entry_end_et: str = Field(default="11:30", alias="ENTRY_END_ET")
     force_flat_et: str = Field(default="15:45", alias="FORCE_FLAT_ET")
 
+    # --- Per-strategy entry windows ---
+    open_drive_entry_start_et: str = Field(default="09:35", alias="OPEN_DRIVE_ENTRY_START_ET")
+    open_drive_entry_end_et: str = Field(default="11:30", alias="OPEN_DRIVE_ENTRY_END_ET")
+    intraday_entry_start_et: str = Field(default="10:30", alias="INTRADAY_ENTRY_START_ET")
+    intraday_entry_end_et: str = Field(default="14:30", alias="INTRADAY_ENTRY_END_ET")
+
+    # --- Per-strategy enable flags ---
+    strategy_open_drive_enabled: bool = Field(default=True, alias="STRATEGY_OPEN_DRIVE_ENABLED")
+    strategy_open_drive_paper_enabled: bool = Field(default=True, alias="STRATEGY_OPEN_DRIVE_PAPER_ENABLED")
+    strategy_intraday_continuation_enabled: bool = Field(default=True, alias="STRATEGY_INTRADAY_CONTINUATION_ENABLED")
+    strategy_intraday_continuation_paper_enabled: bool = Field(default=False, alias="STRATEGY_INTRADAY_CONTINUATION_PAPER_ENABLED")
+    strategy_intra_event_momo_enabled: bool = Field(default=False, alias="STRATEGY_INTRA_EVENT_MOMO_ENABLED")
+    strategy_swing_event_continuation_enabled: bool = Field(default=True, alias="STRATEGY_SWING_EVENT_CONTINUATION_ENABLED")
+    strategy_swing_event_continuation_paper_enabled: bool = Field(default=False, alias="STRATEGY_SWING_EVENT_CONTINUATION_PAPER_ENABLED")
+
+    # --- Swing strategy risk controls (lower defaults than intraday) ---
+    swing_risk_per_trade_pct_equity: float = Field(default=0.5, alias="SWING_RISK_PER_TRADE_PCT_EQUITY")
+    swing_max_position_pct_equity: float = Field(default=5.0, alias="SWING_MAX_POSITION_PCT_EQUITY")
+    swing_max_concurrent_positions: int = Field(default=3, alias="SWING_MAX_CONCURRENT_POSITIONS")
+    swing_max_gross_exposure_pct_equity: float = Field(default=15.0, alias="SWING_MAX_GROSS_EXPOSURE_PCT_EQUITY")
+    swing_max_symbol_exposure_pct_equity: float = Field(default=5.0, alias="SWING_MAX_SYMBOL_EXPOSURE_PCT_EQUITY")
+    swing_max_overnight_exposure_pct_equity: float = Field(default=10.0, alias="SWING_MAX_OVERNIGHT_EXPOSURE_PCT_EQUITY")
+
     # Scrappy strategy bridge: off | advisory | required
     scrappy_mode: str = Field(default="advisory", alias="SCRAPPY_MODE")
 

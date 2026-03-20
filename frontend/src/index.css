@@ -657,6 +657,9 @@ tr:hover { background: rgba(255,255,255,0.02); }
 .badge--yellow { background: rgba(210,153,34,0.15);  color: var(--warning); border: 1px solid rgba(210,153,34,0.3); }
 .badge--blue   { background: rgba(88,166,255,0.15);  color: var(--accent);  border: 1px solid rgba(88,166,255,0.3); }
 .badge--dim    { background: rgba(139,148,158,0.1);  color: var(--text-muted); border: 1px solid rgba(139,148,158,0.2); }
+.badge--success { background: rgba(63,185,80,0.15);  color: var(--success); border: 1px solid rgba(63,185,80,0.3); }
+.badge--swing   { background: rgba(136,108,228,0.15); color: #886ce4; border: 1px solid rgba(136,108,228,0.3); }
+.badge--intraday { background: rgba(88,166,255,0.1);  color: var(--accent);  border: 1px solid rgba(88,166,255,0.2); }
 
 /* ── Table row highlight */
 .data-table tbody tr.row--highlight td { background: rgba(88,166,255,0.06); }

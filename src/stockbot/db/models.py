@@ -310,6 +310,14 @@ class PaperLifecycle(Base):
     universe_source: Mapped[str] = mapped_column(String(16), nullable=False, default="dynamic")
     paper_armed: Mapped[bool] = mapped_column(nullable=False, default=False)
     paper_armed_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Holding period and swing lifecycle
+    holding_period_type: Mapped[str] = mapped_column(String(16), nullable=False, default="intraday")  # intraday | swing
+    max_hold_days: Mapped[int] = mapped_column(nullable=False, default=0)  # 0 = intraday
+    entry_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # YYYY-MM-DD
+    scheduled_exit_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # max hold date
+    days_held: Mapped[int] = mapped_column(nullable=False, default=0)
+    overnight_carry: Mapped[bool] = mapped_column(nullable=False, default=False)
+    overnight_carry_count: Mapped[int] = mapped_column(nullable=False, default=0)
     # Lifecycle status
     lifecycle_status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned", index=True)
     exit_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

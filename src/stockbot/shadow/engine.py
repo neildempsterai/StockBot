@@ -86,6 +86,10 @@ class ShadowPosition:
     target_price: Decimal
     slippage_bps: int
     fee_per_share: Decimal
+    holding_period_type: str = "intraday"  # "intraday" | "swing"
+    max_hold_days: int = 0
+    strategy_id: str = ""
+    entry_date: str = ""  # YYYY-MM-DD
 
 
 def _gross_pnl(side: str, qty: Decimal, entry: Decimal, exit_price: Decimal) -> Decimal:
@@ -204,3 +208,15 @@ class ShadowState:
 
     def clear_all(self) -> None:
         self._positions.clear()
+
+    def positions_by_symbol_strategy(self) -> dict[str, str]:
+        """Return {symbol: strategy_id} for all open positions."""
+        return {sym: pos.strategy_id for sym, pos in self._positions.items()}
+
+    def swing_positions(self) -> list[ShadowPosition]:
+        """Return all open swing positions."""
+        return [p for p in self._positions.values() if p.holding_period_type == "swing"]
+
+    def intraday_positions(self) -> list[ShadowPosition]:
+        """Return all open intraday positions."""
+        return [p for p in self._positions.values() if p.holding_period_type == "intraday"]

@@ -65,6 +65,7 @@ export function AiReferee() {
   // PHASE 3 FIX: Determine assessability reasons for symbols without assessments
   const isPremarket = premarketStatus?.is_premarket ?? false;
   const currentSession = premarketStatus?.session ?? 'unknown';
+  const aiRefereeEnabled = runtimeStatus?.ai_referee?.enabled ?? false;
   
   // Calculate coverage with assessability context
   const focusWithAssessment = focusSymbols.filter((o) =>
@@ -103,7 +104,6 @@ export function AiReferee() {
   }
 
   const assessments = data?.assessments ?? [];
-  const aiRefereeEnabled = runtimeStatus?.ai_referee?.enabled ?? false;
   const aiRefereeMode = runtimeStatus?.ai_referee?.mode ?? 'advisory';
   const paperRequired = runtimeStatus?.ai_referee?.paper_required ?? false;
 

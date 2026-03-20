@@ -265,8 +265,15 @@ async def runtime_status() -> dict:
     paper_e2e_supported = bool(s.alpaca_api_key_id and s.alpaca_api_secret_key)
     out: dict = {
         "strategy": {
-            "id": "INTRA_EVENT_MOMO",
-            "version": "0.1.0",
+            "id": "MULTI_STRATEGY",
+            "active_strategies": [
+                sid for sid, enabled in [
+                    ("OPEN_DRIVE_MOMO", getattr(s, "strategy_open_drive_enabled", True)),
+                    ("INTRADAY_CONTINUATION", getattr(s, "strategy_intraday_continuation_enabled", True)),
+                    ("INTRA_EVENT_MOMO", getattr(s, "strategy_intra_event_momo_enabled", False)),
+                    ("SWING_EVENT_CONTINUATION", getattr(s, "strategy_swing_event_continuation_enabled", True)),
+                ] if enabled
+            ],
             "execution_mode": s.execution_mode,
             "paper_execution_enabled": s.paper_execution_enabled,
         },
@@ -408,21 +415,55 @@ def backtest_status() -> dict:
 
 @app.get("/v1/strategies")
 async def list_strategies() -> dict:
-    """List configured strategies (INTRA_EVENT_MOMO). Mode reflects EXECUTION_MODE (shadow | paper)."""
+    """List all configured strategies with their enable/paper status."""
     settings = get_settings()
-    mode = getattr(settings, "execution_mode", "shadow")
-    mode_label = "paper" if mode == "paper" else "shadow-only"
-    return {
-        "strategies": [
-            {
-                "strategy_id": "INTRA_EVENT_MOMO",
-                "strategy_version": "0.1.0",
-                "mode": mode_label,
-                "entry_window_et": "09:35-11:30",
-                "force_flat_et": "15:45",
-            }
-        ]
-    }
+    exec_mode = getattr(settings, "execution_mode", "shadow")
+    strategies = [
+        {
+            "strategy_id": "OPEN_DRIVE_MOMO",
+            "strategy_version": "0.1.0",
+            "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_open_drive_paper_enabled", True) else "shadow-only",
+            "entry_window_et": "09:35-11:30",
+            "force_flat_et": "15:45",
+            "enabled": getattr(settings, "strategy_open_drive_enabled", True),
+            "paper_enabled": getattr(settings, "strategy_open_drive_paper_enabled", True),
+            "holding_period_type": "intraday",
+        },
+        {
+            "strategy_id": "INTRADAY_CONTINUATION",
+            "strategy_version": "0.1.0",
+            "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_intraday_continuation_paper_enabled", False) else "shadow-only",
+            "entry_window_et": "10:30-14:30",
+            "force_flat_et": "15:45",
+            "enabled": getattr(settings, "strategy_intraday_continuation_enabled", True),
+            "paper_enabled": getattr(settings, "strategy_intraday_continuation_paper_enabled", False),
+            "holding_period_type": "intraday",
+        },
+        {
+            "strategy_id": "INTRA_EVENT_MOMO",
+            "strategy_version": "0.1.0",
+            "mode": "shadow-only",
+            "entry_window_et": "09:35-11:30",
+            "force_flat_et": "15:45",
+            "enabled": getattr(settings, "strategy_intra_event_momo_enabled", False),
+            "paper_enabled": False,
+            "holding_period_type": "intraday",
+            "note": "frozen baseline",
+        },
+        {
+            "strategy_id": "SWING_EVENT_CONTINUATION",
+            "strategy_version": "0.1.0",
+            "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_swing_event_continuation_paper_enabled", False) else "shadow-only",
+            "entry_window_et": "13:00-15:30",
+            "force_flat_et": None,
+            "enabled": getattr(settings, "strategy_swing_event_continuation_enabled", True),
+            "paper_enabled": getattr(settings, "strategy_swing_event_continuation_paper_enabled", False),
+            "holding_period_type": "swing",
+            "max_hold_days": 5,
+            "overnight_carry": True,
+        },
+    ]
+    return {"strategies": strategies}
 
 
 @app.get("/v1/signals/rejection-summary")
@@ -434,22 +475,34 @@ async def get_signals_rejection_summary() -> dict:
         from datetime import UTC, datetime, timedelta
         from stockbot.market_sessions import current_session
         from stockbot.config import get_settings
-        from stockbot.strategies.intra_event_momo import ENTRY_START_ET, ENTRY_END_ET
         import redis.asyncio as redis
         
         settings = get_settings()
         session_label = current_session()
-        entry_start = getattr(settings, "entry_start_et", None) or ENTRY_START_ET
-        entry_end = getattr(settings, "entry_end_et", None) or ENTRY_END_ET
+        entry_windows = {
+            "OPEN_DRIVE_MOMO": ("09:35", "11:30"),
+            "INTRADAY_CONTINUATION": ("10:30", "14:30"),
+            "SWING_EVENT_CONTINUATION": ("13:00", "15:30"),
+        }
         
-        # Check if currently in entry window
+        # Check if currently in any entry window
         now_utc = datetime.now(UTC)
+        in_entry_window = False
+        active_windows: list[str] = []
+        entry_start = "09:35"
+        entry_end = "15:30"
         try:
             import zoneinfo
             et = zoneinfo.ZoneInfo("America/New_York")
             et_now = now_utc.astimezone(et)
             et_time_str = et_now.strftime("%H:%M")
-            in_entry_window = entry_start <= et_time_str <= entry_end
+            for sid, (start, end) in entry_windows.items():
+                if start <= et_time_str <= end:
+                    in_entry_window = True
+                    active_windows.append(f"{sid} ({start}-{end})")
+            if active_windows:
+                entry_start = active_windows[0].split("(")[1].rstrip(")").split("-")[0]
+                entry_end = active_windows[-1].split("(")[1].rstrip(")").split("-")[1]
         except Exception:
             in_entry_window = False
         
@@ -535,12 +588,13 @@ async def get_signals_rejection_summary() -> dict:
 async def list_signals(
     limit: int = Query(default=50, ge=1, le=200),
     scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+    strategy_id: str | None = Query(None, description="Filter by strategy_id (e.g., OPEN_DRIVE_MOMO, INTRADAY_CONTINUATION)"),
 ) -> dict:
     """Recent signals from DB, optionally filtered by scrappy_mode."""
     factory = get_session_factory()
     async with factory() as session:
         store = LedgerStore(session)
-        signals = await store.get_signals(limit=limit, scrappy_mode=scrappy_mode)
+        signals = await store.get_signals(limit=limit, scrappy_mode=scrappy_mode, strategy_id=strategy_id)
     return {
         "signals": [
             {
@@ -841,12 +895,23 @@ async def intelligence_summary() -> dict:
 async def list_shadow_trades(
     limit: int = Query(default=50, ge=1, le=200),
     scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+    strategy_id: str | None = Query(None, description="Filter by strategy_id (e.g., OPEN_DRIVE_MOMO, INTRADAY_CONTINUATION)"),
 ) -> dict:
-    """Recent shadow trades (ideal + realistic), optionally filtered by scrappy_mode."""
+    """Recent shadow trades (ideal + realistic), optionally filtered by scrappy_mode or strategy_id."""
     factory = get_session_factory()
     async with factory() as session:
         store = LedgerStore(session)
-        trades = await store.list_shadow_trades(limit=limit, scrappy_mode=scrappy_mode)
+        trades = await store.list_shadow_trades(limit=limit, scrappy_mode=scrappy_mode, strategy_id=strategy_id)
+        # Fetch strategy info for each trade by joining with Signal
+        signal_uuids = [t.signal_uuid for t in trades]
+        strategy_map: dict[UUID, tuple[str | None, str | None]] = {}
+        if signal_uuids:
+            sig_result = await session.execute(
+                select(Signal.signal_uuid, Signal.strategy_id, Signal.strategy_version)
+                .where(Signal.signal_uuid.in_(signal_uuids))
+            )
+            for sig in sig_result.all():
+                strategy_map[sig.signal_uuid] = (sig.strategy_id, sig.strategy_version)
     return {
         "trades": [
             {
@@ -861,11 +926,14 @@ async def list_shadow_trades(
                 "gross_pnl": float(t.gross_pnl) if t.gross_pnl else None,
                 "net_pnl": float(t.net_pnl) if t.net_pnl else None,
                 "scrappy_mode": getattr(t, "scrappy_mode", None),
+                "strategy_id": strategy_map.get(t.signal_uuid, (None, None))[0],
+                "strategy_version": strategy_map.get(t.signal_uuid, (None, None))[1],
             }
             for t in trades
         ],
         "count": len(trades),
         "scrappy_mode_filter": scrappy_mode,
+        "strategy_id_filter": strategy_id,
     }
 
 
@@ -1267,6 +1335,13 @@ async def paper_exposure() -> dict:
                 "market_value": market_value_float,
                 "current_price": current_price_float,
                 "avg_entry_price": avg_entry_price_float,
+                "holding_period_type": getattr(lifecycle, "holding_period_type", "intraday") if lifecycle else "intraday",
+                "max_hold_days": getattr(lifecycle, "max_hold_days", 0) if lifecycle else 0,
+                "entry_date": getattr(lifecycle, "entry_date", None) if lifecycle else None,
+                "scheduled_exit_date": getattr(lifecycle, "scheduled_exit_date", None) if lifecycle else None,
+                "days_held": getattr(lifecycle, "days_held", 0) if lifecycle else 0,
+                "overnight_carry": getattr(lifecycle, "overnight_carry", False) if lifecycle else False,
+                "overnight_carry_count": getattr(lifecycle, "overnight_carry_count", 0) if lifecycle else 0,
             })
     return {"positions": exposure, "count": len(exposure)}
 
@@ -1310,7 +1385,8 @@ async def paper_arming_prerequisites() -> dict:
     broker_ok = False
     try:
         client = AlpacaClient()
-        _ = client.get_account()
+        import asyncio as _aio
+        _ = await _aio.to_thread(client.get_account)
         broker_ok = True
     except Exception as e:
         checks["broker_reachable"] = {"ok": False, "detail": str(e)[:80]}
@@ -1756,8 +1832,9 @@ async def paper_test_cancel_all() -> dict:
 @app.get("/v1/metrics/summary")
 async def metrics_summary(
     scrappy_mode: str | None = Query(None, description="Filter by scrappy_mode (advisory, required, off)"),
+    strategy_id: str | None = Query(None, description="Filter by strategy_id (e.g., OPEN_DRIVE_MOMO, INTRADAY_CONTINUATION)"),
 ) -> dict:
-    """Summary: signal count, shadow trade count, total net PnL, Scrappy attribution; optionally filtered by scrappy_mode."""
+    """Summary: signal count, shadow trade count, total net PnL, Scrappy attribution; optionally filtered by scrappy_mode or strategy_id."""
     factory = get_session_factory()
     async with factory() as session:
         q_sig = select(func.count(Signal.id))
@@ -1769,6 +1846,11 @@ async def metrics_summary(
             q_trade = q_trade.where(ShadowTrade.scrappy_mode == scrappy_mode)
             q_pnl = q_pnl.where(ShadowTrade.scrappy_mode == scrappy_mode)
             q_with_snap = q_with_snap.where(Signal.scrappy_mode == scrappy_mode)
+        if strategy_id is not None:
+            q_sig = q_sig.where(Signal.strategy_id == strategy_id)
+            q_trade = q_trade.join(Signal, ShadowTrade.signal_uuid == Signal.signal_uuid).where(Signal.strategy_id == strategy_id)
+            q_pnl = q_pnl.join(Signal, ShadowTrade.signal_uuid == Signal.signal_uuid).where(Signal.strategy_id == strategy_id)
+            q_with_snap = q_with_snap.where(Signal.strategy_id == strategy_id)
         sig_count = (await session.execute(q_sig)).scalar() or 0
         trade_count = (await session.execute(q_trade)).scalar() or 0
         total_net_pnl = float((await session.execute(q_pnl)).scalar() or 0)
@@ -1785,6 +1867,8 @@ async def metrics_summary(
     }
     if scrappy_mode is not None:
         out["scrappy_mode_filter"] = scrappy_mode
+    if strategy_id is not None:
+        out["strategy_id_filter"] = strategy_id
     return out
 
 
@@ -1952,6 +2036,81 @@ async def metrics_compare_ai_referee() -> dict:
         "signals_without_referee": assisted.get("signals_without_referee", 0),
         "signals_total": assisted.get("signals_total", 0),
         "note": "Sample size may be too small for statistical comparison.",
+    }
+
+
+@app.get("/v1/metrics/compare-strategies")
+async def metrics_compare_strategies() -> dict:
+    """Metrics segmented by strategy_id: signals, trades, PnL, rejection reasons."""
+    factory = get_session_factory()
+    async with factory() as session:
+        # Get all unique strategy_ids
+        q_strategies = select(Signal.strategy_id).distinct()
+        result_strategies = await session.execute(q_strategies)
+        strategy_ids = [s for s in result_strategies.scalars().all() if s]
+        
+        segments: dict[str, dict] = {}
+        for strategy_id in strategy_ids:
+            # Signals count
+            q_sig = select(func.count(Signal.id)).where(Signal.strategy_id == strategy_id)
+            sig_count = (await session.execute(q_sig)).scalar() or 0
+            
+            # Shadow trades count and PnL (join with Signal to filter by strategy)
+            q_trade = select(func.count(ShadowTrade.id)).join(Signal, ShadowTrade.signal_uuid == Signal.signal_uuid).where(Signal.strategy_id == strategy_id)
+            q_pnl = select(func.sum(ShadowTrade.net_pnl)).join(Signal, ShadowTrade.signal_uuid == Signal.signal_uuid).where(Signal.strategy_id == strategy_id)
+            trade_count = (await session.execute(q_trade)).scalar() or 0
+            total_pnl = float((await session.execute(q_pnl)).scalar() or 0)
+            
+            # Get strategy version (most recent)
+            q_version = select(Signal.strategy_version).where(Signal.strategy_id == strategy_id).order_by(Signal.created_at.desc()).limit(1)
+            version_result = await session.execute(q_version)
+            strategy_version = version_result.scalar() or "unknown"
+            
+            # Get rejection summary from Redis (strategy-specific keys)
+            rejection_counts: dict[str, int] = {}
+            try:
+                import redis.asyncio as redis
+                from stockbot.config import get_settings
+                settings = get_settings()
+                redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+                # Check for strategy-specific rejection keys
+                pattern = f"stockbot:worker:rejection_summary:{strategy_id}:*"
+                keys = await redis_client.keys(pattern)
+                for key in keys:
+                    # Extract reason code from key (format: stockbot:worker:rejection_summary:STRATEGY_ID:REASON)
+                    parts = key.split(":")
+                    if len(parts) >= 5:
+                        reason = ":".join(parts[4:])  # Get everything after strategy_id
+                        count = await redis_client.get(key)
+                        if count:
+                            rejection_counts[reason] = int(count)
+                await redis_client.aclose()
+            except Exception:
+                pass
+            
+            segments[strategy_id] = {
+                "strategy_version": strategy_version,
+                "signals_total": sig_count,
+                "shadow_trades_total": trade_count,
+                "total_net_pnl_shadow": round(total_pnl, 2),
+                "rejection_counts": rejection_counts,
+            }
+        
+        # Unknown/null strategy
+        q_sig_u = select(func.count(Signal.id)).where(Signal.strategy_id.is_(None))
+        q_trade_u = select(func.count(ShadowTrade.id)).where(~ShadowTrade.signal_uuid.in_(select(Signal.signal_uuid).where(Signal.strategy_id.isnot(None))))
+        q_pnl_u = select(func.sum(ShadowTrade.net_pnl)).where(~ShadowTrade.signal_uuid.in_(select(Signal.signal_uuid).where(Signal.strategy_id.isnot(None))))
+        segments["unknown"] = {
+            "strategy_version": None,
+            "signals_total": (await session.execute(q_sig_u)).scalar() or 0,
+            "shadow_trades_total": (await session.execute(q_trade_u)).scalar() or 0,
+            "total_net_pnl_shadow": round(float((await session.execute(q_pnl_u)).scalar() or 0), 2),
+            "rejection_counts": {},
+        }
+    
+    return {
+        "by_strategy": segments,
+        "note": "Metrics are segmented by strategy_id. Shadow trades are linked via signal_uuid. Rejection counts from Redis (1-hour rolling window).",
     }
 
 
@@ -2287,7 +2446,7 @@ async def get_scanner_top() -> dict:
 
 @app.get("/v1/scanner/symbol/{symbol}")
 async def get_scanner_symbol(symbol: str) -> dict:
-    """Latest candidate row for symbol (any run)."""
+    """Latest candidate row for symbol (any run). Includes strategy eligibility."""
     factory = get_session_factory()
     async with factory() as session:
         r = await session.execute(
@@ -2299,7 +2458,25 @@ async def get_scanner_symbol(symbol: str) -> dict:
         row = r.scalars().first()
     if not row:
         raise HTTPException(status_code=404, detail="not_found")
-    return _row_to_candidate(row)
+    result = _row_to_candidate(row)
+    
+    # PHASE 5: Add strategy eligibility information
+    try:
+        market_data = {
+            "price": float(row.price) if row.price else None,
+            "gap_pct": row.gap_pct,
+            "spread_bps": row.spread_bps,
+        }
+        strategy_eligibility = await _get_strategy_eligibility_for_symbol(
+            symbol.upper(),
+            market_data=market_data,
+        )
+        result["strategy_eligibility"] = strategy_eligibility
+    except Exception as e:
+        logger.debug("strategy_eligibility_check_failed symbol=%s error=%s", symbol, e)
+        result["strategy_eligibility"] = {}
+    
+    return result
 
 
 @app.get("/v1/scanner/summary")
@@ -2407,6 +2584,18 @@ async def get_opportunities_now() -> dict:
                     base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
                 else:
                     base["scrappy_present"] = False  # Ensure flag reflects reality
+                
+                # PHASE 5: Add strategy eligibility information
+                try:
+                    strategy_eligibility = await _get_strategy_eligibility_for_symbol(
+                        symbol_upper,
+                        market_data=market_data,
+                    )
+                    base["strategy_eligibility"] = strategy_eligibility
+                except Exception as e:
+                    logger.debug("strategy_eligibility_check_failed symbol=%s error=%s", symbol_upper, e)
+                    base["strategy_eligibility"] = {}
+                
                 opportunities.append(_sanitize_json_value(base))
             result = {"opportunities": opportunities, "run_id": run_id, "updated_at": updated_at}
             return _sanitize_json_value(result)
@@ -2430,6 +2619,12 @@ async def get_opportunities_now() -> dict:
             snapshot_map = await _get_latest_snapshots_for_symbols(session, all_symbols)
         opportunities = []
         for c in candidates:
+            symbol_upper = (c.symbol or "").strip().upper()
+            market_data = {
+                "price": float(c.price) if c.price else None,
+                "gap_pct": c.gap_pct,
+                "spread_bps": c.spread_bps,
+            }
             base = {
                 "symbol": c.symbol,
                 "rank": c.rank,
@@ -2440,18 +2635,30 @@ async def get_opportunities_now() -> dict:
                 "component_scores": c.component_scores_json or {},
                 "reason_codes": c.reason_codes_json or [],
                 "inclusion_reasons": c.reason_codes_json or [],
-                "price": float(c.price) if c.price else None,
-                "gap_pct": c.gap_pct,
-                "spread_bps": c.spread_bps,
+                "price": market_data["price"],
+                "gap_pct": market_data["gap_pct"],
+                "spread_bps": market_data["spread_bps"],
                 "scrappy_present": c.scrappy_present or False,
             }
             # PHASE 2 FIX: Always check actual snapshot existence, update scrappy_present based on reality
-            snap = snapshot_map.get((c.symbol or "").strip())
+            snap = snapshot_map.get(symbol_upper)
             if snap:
                 base.update(_snapshot_to_scrappy_enrichment(snap))
                 base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
             else:
                 base["scrappy_present"] = False  # Ensure flag reflects reality
+            
+            # PHASE 5: Add strategy eligibility information
+            try:
+                strategy_eligibility = await _get_strategy_eligibility_for_symbol(
+                    symbol_upper,
+                    market_data=market_data,
+                )
+                base["strategy_eligibility"] = strategy_eligibility
+            except Exception as e:
+                logger.debug("strategy_eligibility_check_failed symbol=%s error=%s", symbol_upper, e)
+                base["strategy_eligibility"] = {}
+            
             opportunities.append(_sanitize_json_value(base))
         result = {
             "opportunities": opportunities,
@@ -2468,6 +2675,113 @@ async def get_opportunities_now() -> dict:
             "run_id": None,
             "updated_at": None,
         })
+
+
+async def _get_strategy_eligibility_for_symbol(
+    symbol: str,
+    market_data: dict | None = None,
+) -> dict[str, dict]:
+    """
+    Check strategy eligibility for a symbol.
+    Returns dict mapping strategy_id -> {eligible: bool, reason: str | None, entry_window: str, paper_enabled: bool}.
+    """
+    from datetime import UTC, datetime
+    from stockbot.config import get_settings
+    from stockbot.strategies.router import StrategyConfig, get_active_strategies, should_evaluate_strategy
+    import redis.asyncio as redis
+    
+    settings = get_settings()
+    now = datetime.now(UTC)
+    
+    configs = []
+    configs.append(StrategyConfig(
+        strategy_id="OPEN_DRIVE_MOMO",
+        strategy_version="0.1.0",
+        entry_start_et=getattr(settings, "open_drive_entry_start_et", "09:35"),
+        entry_end_et=getattr(settings, "open_drive_entry_end_et", "11:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=getattr(settings, "strategy_open_drive_enabled", True),
+        paper_enabled=getattr(settings, "strategy_open_drive_paper_enabled", True),
+    ))
+
+    configs.append(StrategyConfig(
+        strategy_id="INTRADAY_CONTINUATION",
+        strategy_version="0.1.0",
+        entry_start_et=getattr(settings, "intraday_entry_start_et", "10:30"),
+        entry_end_et=getattr(settings, "intraday_entry_end_et", "14:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=getattr(settings, "strategy_intraday_continuation_enabled", True),
+        paper_enabled=getattr(settings, "strategy_intraday_continuation_paper_enabled", False),
+    ))
+    
+    intra_event_enabled = getattr(settings, "strategy_intra_event_momo_enabled", False)
+    configs.append(StrategyConfig(
+        strategy_id="INTRA_EVENT_MOMO",
+        strategy_version="0.1.0",
+        entry_start_et=getattr(settings, "entry_start_et", "09:35"),
+        entry_end_et=getattr(settings, "entry_end_et", "11:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=intra_event_enabled,
+        paper_enabled=False,
+    ))
+
+    swing_enabled = getattr(settings, "strategy_swing_event_continuation_enabled", True)
+    swing_paper = getattr(settings, "strategy_swing_event_continuation_paper_enabled", False)
+    configs.append(StrategyConfig(
+        strategy_id="SWING_EVENT_CONTINUATION",
+        strategy_version="0.1.0",
+        entry_start_et="13:00",
+        entry_end_et="15:30",
+        force_flat_et=None,
+        enabled=swing_enabled,
+        paper_enabled=swing_paper,
+        holding_period_type="swing",
+        max_hold_days=5,
+    ))
+
+    # Get already-traded symbols from Redis (per strategy)
+    already_traded: set[str] = set()
+    try:
+        redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+        for config in configs:
+            traded_key = f"stockbot:strategies:{config.strategy_id.lower()}:traded_today"
+            try:
+                traded = await redis_client.smembers(traded_key)
+                already_traded.update(traded)
+            except Exception:
+                pass
+        await redis_client.aclose()
+    except Exception:
+        pass
+    
+    # Check eligibility for each strategy
+    eligibility: dict[str, dict] = {}
+    for config in configs:
+        should_eval, reason = should_evaluate_strategy(
+            config.strategy_id,
+            symbol,
+            now,
+            already_traded,
+            configs,
+        )
+        entry_window = f"{config.entry_start_et}-{config.entry_end_et} ET"
+        elig_entry: dict[str, Any] = {
+            "eligible": should_eval,
+            "reason": reason,
+            "entry_window": entry_window,
+            "paper_enabled": config.paper_enabled,
+            "enabled": config.enabled,
+            "holding_period_type": getattr(config, "holding_period_type", "intraday"),
+        }
+        if getattr(config, "holding_period_type", "intraday") == "swing":
+            elig_entry["max_hold_days"] = getattr(config, "max_hold_days", 5)
+            elig_entry["overnight_carry"] = True
+            elig_entry["force_flat_et"] = None
+        else:
+            elig_entry["force_flat_et"] = config.force_flat_et
+        eligibility[config.strategy_id] = elig_entry
+
+    return eligibility
 
 
 def _session_allowed_and_reason() -> tuple[str, bool, bool, str | None]:
@@ -2580,6 +2894,21 @@ async def get_opportunities_symbol(symbol: str) -> dict:
             snap = await get_latest_snapshot_by_symbol(session, sym)
             if snap:
                 out.update(_snapshot_to_scrappy_enrichment(snap))
+        
+        # PHASE 5: Add strategy eligibility information
+        try:
+            market_data = {
+                "price": float(row.total_score) if row.total_score else None,
+            }
+            strategy_eligibility = await _get_strategy_eligibility_for_symbol(
+                sym,
+                market_data=market_data,
+            )
+            out["strategy_eligibility"] = strategy_eligibility
+        except Exception as e:
+            logger.debug("strategy_eligibility_check_failed symbol=%s error=%s", sym, e)
+            out["strategy_eligibility"] = {}
+    
     return out
 
 

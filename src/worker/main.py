@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -42,14 +42,41 @@ from stockbot.shadow.engine import (
     resolve_exit_conservative,
 )
 from stockbot.strategies.intra_event_momo import (
-    STRATEGY_ID,
-    STRATEGY_VERSION,
+    STRATEGY_ID as INTRA_EVENT_MOMO_ID,
+    STRATEGY_VERSION as INTRA_EVENT_MOMO_VERSION,
     FeatureSet,
     NewsItem,
     classify_news_side,
-    evaluate,
-    exit_stop_target_prices,
+    evaluate as evaluate_intra_event_momo,
+    exit_stop_target_prices as exit_stop_target_intra_event_momo,
     news_keyword_hits,
+)
+from stockbot.strategies.open_drive_momo import (
+    STRATEGY_ID as OPEN_DRIVE_MOMO_ID,
+    STRATEGY_VERSION as OPEN_DRIVE_MOMO_VERSION,
+    evaluate as evaluate_open_drive_momo,
+    exit_stop_target_prices as exit_stop_target_open_drive_momo,
+)
+from stockbot.strategies.intraday_continuation import (
+    STRATEGY_ID as INTRADAY_CONTINUATION_ID,
+    STRATEGY_VERSION as INTRADAY_CONTINUATION_VERSION,
+    FeatureSet as ContinuationFeatureSet,
+    evaluate as evaluate_intraday_continuation,
+    exit_stop_target_prices as exit_stop_target_intraday_continuation,
+)
+from stockbot.strategies.router import (
+    StrategyConfig,
+    get_active_strategies,
+    has_conflicting_position,
+    should_evaluate_strategy,
+    select_primary_strategy,
+)
+from stockbot.strategies.swing_event_continuation import (
+    STRATEGY_ID as SWING_EVENT_CONTINUATION_ID,
+    STRATEGY_VERSION as SWING_EVENT_CONTINUATION_VERSION,
+    SwingFeatureSet,
+    evaluate as evaluate_swing_event_continuation,
+    compute_stop_target as compute_stop_target_swing,
 )
 
 # Paper execution: sync Alpaca calls run in thread
@@ -156,8 +183,64 @@ from stockbot.strategies.state import BarLike, SymbolState
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TRADED_TODAY_KEY = "stockbot:strategies:intra_event_momo:traded_today"
-REDIS_LAST_IDS_KEY = "stockbot:worker:intra_event_momo:last_ids"
+# Strategy-specific traded today keys (one per strategy per symbol per day)
+def get_traded_today_key(strategy_id: str) -> str:
+    """Return Redis key for tracking traded symbols per strategy per symbol per day."""
+    return f"stockbot:strategies:{strategy_id.lower()}:traded_today"
+
+REDIS_LAST_IDS_KEY = "stockbot:worker:last_ids"
+
+
+def _get_strategy_configs(settings: object) -> list[StrategyConfig]:
+    """Load strategy configurations from settings."""
+    configs = []
+
+    configs.append(StrategyConfig(
+        strategy_id=OPEN_DRIVE_MOMO_ID,
+        strategy_version=OPEN_DRIVE_MOMO_VERSION,
+        entry_start_et=getattr(settings, "open_drive_entry_start_et", "09:35"),
+        entry_end_et=getattr(settings, "open_drive_entry_end_et", "11:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=getattr(settings, "strategy_open_drive_enabled", True),
+        paper_enabled=getattr(settings, "strategy_open_drive_paper_enabled", True),
+        holding_period_type="intraday",
+    ))
+
+    configs.append(StrategyConfig(
+        strategy_id=INTRADAY_CONTINUATION_ID,
+        strategy_version=INTRADAY_CONTINUATION_VERSION,
+        entry_start_et=getattr(settings, "intraday_entry_start_et", "10:30"),
+        entry_end_et=getattr(settings, "intraday_entry_end_et", "14:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=getattr(settings, "strategy_intraday_continuation_enabled", True),
+        paper_enabled=getattr(settings, "strategy_intraday_continuation_paper_enabled", False),
+        holding_period_type="intraday",
+    ))
+
+    configs.append(StrategyConfig(
+        strategy_id=INTRA_EVENT_MOMO_ID,
+        strategy_version=INTRA_EVENT_MOMO_VERSION,
+        entry_start_et=getattr(settings, "entry_start_et", "09:35"),
+        entry_end_et=getattr(settings, "entry_end_et", "11:30"),
+        force_flat_et=getattr(settings, "force_flat_et", "15:45"),
+        enabled=getattr(settings, "strategy_intra_event_momo_enabled", False),
+        paper_enabled=False,
+        holding_period_type="intraday",
+    ))
+
+    configs.append(StrategyConfig(
+        strategy_id=SWING_EVENT_CONTINUATION_ID,
+        strategy_version=SWING_EVENT_CONTINUATION_VERSION,
+        entry_start_et="13:00",
+        entry_end_et="15:30",
+        force_flat_et=None,
+        enabled=getattr(settings, "strategy_swing_event_continuation_enabled", True),
+        paper_enabled=getattr(settings, "strategy_swing_event_continuation_paper_enabled", False),
+        holding_period_type="swing",
+        max_hold_days=5,
+    ))
+
+    return configs
 HEARTBEAT_KEY = "stockbot:worker:heartbeat"
 HEARTBEAT_TTL_SEC = 60
 HEARTBEAT_INTERVAL_SEC = 30
@@ -231,6 +314,674 @@ def _et_time_after(ts: datetime, et_time: str) -> bool:
         return t_str >= et_time
     except Exception:
         return False
+
+
+async def _evaluate_symbol_with_strategy(
+    redis_client: redis.Redis,
+    sym_state: SymbolState,
+    shadow_state: ShadowState,
+    settings: object,
+    fee_per_share: Decimal,
+    slippage_bps: int,
+    strategy_config: StrategyConfig,
+    snapshot_row: Any | None,
+    scrappy_mode: str,
+    news_side: str,
+    keyword_hits: list[str],
+    features: FeatureSet,
+    last_bar: BarLike,
+) -> bool:
+    """
+    Evaluate symbol with a specific strategy. Returns True if signal was emitted, False otherwise.
+    Handles all strategy-specific evaluation, gating, signal creation, and trade tracking.
+    """
+    symbol = sym_state.symbol
+    strategy_id = strategy_config.strategy_id
+    strategy_version = strategy_config.strategy_version
+    
+    # Check if symbol already traded by this strategy today
+    traded_today_key = get_traded_today_key(strategy_id)
+    traded = await redis_client.smembers(traded_today_key)
+    strategy_traded_key = f"{strategy_id}:{symbol}"
+    if strategy_traded_key in traded:
+        return False
+    
+    # Evaluate with appropriate strategy function
+    eval_result = None
+    or_high = features.opening_range_high if features else None
+    or_low = features.opening_range_low if features else None
+    vwap = features.session_vwap if features else None
+    
+    if strategy_id == OPEN_DRIVE_MOMO_ID:
+        eval_result = evaluate_open_drive_momo(
+            features,
+            entry_start_et=strategy_config.entry_start_et,
+            entry_end_et=strategy_config.entry_end_et,
+            force_flat_et=strategy_config.force_flat_et,
+        )
+    elif strategy_id == INTRADAY_CONTINUATION_ID:
+        # Continuation strategy needs session bars for extremes
+        continuation_features = ContinuationFeatureSet(
+            symbol=features.symbol,
+            ts=features.ts,
+            prev_close=features.prev_close,
+            gap_pct_from_prev_close=features.gap_pct_from_prev_close,
+            spread_bps=features.spread_bps,
+            minute_dollar_volume=features.minute_dollar_volume,
+            rel_volume_5m=features.rel_volume_5m,
+            opening_range_high=features.opening_range_high,
+            opening_range_low=features.opening_range_low,
+            session_vwap=features.session_vwap,
+            latest_bid=features.latest_bid,
+            latest_ask=features.latest_ask,
+            latest_last=features.latest_last,
+            latest_minute_close=features.latest_minute_close,
+            news_side=features.news_side,
+            news_keyword_hits=features.news_keyword_hits,
+        )
+        # Compute session extremes from bars
+        session_high_val = None
+        session_low_val = None
+        if sym_state.bars:
+            session_high_val = max(b.high for b in sym_state.bars)
+            session_low_val = min(b.low for b in sym_state.bars)
+            continuation_features.session_high = session_high_val
+            continuation_features.session_low = session_low_val
+        eval_result = evaluate_intraday_continuation(
+            continuation_features,
+            entry_start_et=strategy_config.entry_start_et,
+            entry_end_et=strategy_config.entry_end_et,
+            force_flat_et=strategy_config.force_flat_et,
+            session_bars=[b for b in sym_state.bars] if sym_state.bars else None,
+        )
+    elif strategy_id == INTRA_EVENT_MOMO_ID:
+        eval_result = evaluate_intra_event_momo(
+            features,
+            entry_start_et=strategy_config.entry_start_et,
+            entry_end_et=strategy_config.entry_end_et,
+            force_flat_et=strategy_config.force_flat_et,
+        )
+    elif strategy_id == SWING_EVENT_CONTINUATION_ID:
+        # Build swing-specific features from available state + Scrappy snapshot.
+        # Note: features may be None if intraday prerequisites are missing (worker restart).
+        # In that case, build from sym_state and last_bar directly.
+        intraday_high = max(b.high for b in sym_state.bars) if sym_state.bars else None
+        intraday_low = min(b.low for b in sym_state.bars) if sym_state.bars else None
+
+        # Extract current price data — prefer features if available, fall back to sym_state
+        _swing_bid = (features.latest_bid if features else None) or sym_state.latest_bid
+        _swing_ask = (features.latest_ask if features else None) or sym_state.latest_ask
+        _swing_last = (features.latest_last if features else None) or sym_state.latest_last
+        _swing_minute_close = (features.latest_minute_close if features else None) or (last_bar.close if last_bar else None)
+        _swing_spread_bps = (features.spread_bps if features else None) or sym_state.spread_bps or 0
+        _swing_vwap = (features.session_vwap if features else None) or sym_state.vwap
+        _swing_ts = (features.ts if features else None) or (last_bar.timestamp if last_bar else datetime.now(UTC))
+        _swing_rel_volume = (features.rel_volume_5m if features else None) or Decimal("1.0")
+        _swing_prev_close_fallback = (features.prev_close if features else None) or sym_state.prev_close
+
+        # Fetch daily bar context from Alpaca snapshot (prev_daily_bar)
+        prev_close_daily = _swing_prev_close_fallback
+        prev_high_daily = None
+        prev_low_daily = None
+        day_2_low_daily = None
+        avg_daily_dollar_vol = None
+        try:
+            from stockbot.alpaca.client import AlpacaClient
+            snap = await asyncio.to_thread(AlpacaClient().get_snapshot, symbol)
+            if snap and snap.prev_daily_bar:
+                prev_close_daily = snap.prev_daily_bar.close
+                prev_high_daily = snap.prev_daily_bar.high
+                prev_low_daily = snap.prev_daily_bar.low
+            if snap and snap.daily_bar:
+                avg_daily_dollar_vol = (
+                    (snap.daily_bar.high + snap.daily_bar.low + snap.daily_bar.close) / 3
+                    * snap.daily_bar.volume
+                )
+                if prev_low_daily is not None:
+                    day_2_low_daily = min(prev_low_daily, snap.daily_bar.low) if snap.daily_bar.low else prev_low_daily
+        except Exception as e:
+            logger.debug("swing_daily_data_fetch_failed symbol=%s error=%s", symbol, e)
+
+        scrappy_dir = getattr(snapshot_row, "catalyst_direction", None) if snapshot_row else None
+        scrappy_str = getattr(snapshot_row, "catalyst_strength", None) if snapshot_row else None
+        scrappy_stale = getattr(snapshot_row, "stale_flag", True) if snapshot_row else True
+        scrappy_conflict = getattr(snapshot_row, "conflict_flag", False) if snapshot_row else False
+
+        gap_pct_swing = None
+        ext_pct = None
+        close_pos_pct = None
+        price_val = _swing_last or _swing_ask or _swing_bid or Decimal("0")
+        if prev_close_daily is not None and prev_close_daily > 0:
+            from stockbot.strategies.swing_event_continuation import compute_gap_pct as swing_gap_pct, compute_extension_from_reference, compute_close_position_in_range_pct
+            gap_pct_swing = swing_gap_pct(prev_close_daily, price_val)
+            ext_pct = compute_extension_from_reference(price_val, prev_close_daily)
+        if intraday_high is not None and intraday_low is not None:
+            from stockbot.strategies.swing_event_continuation import compute_close_position_in_range_pct
+            close_pos_pct = compute_close_position_in_range_pct(
+                _swing_minute_close or price_val, intraday_high, intraday_low
+            )
+
+        swing_features = SwingFeatureSet(
+            symbol=symbol,
+            ts=_swing_ts,
+            latest_bid=_swing_bid,
+            latest_ask=_swing_ask,
+            latest_last=_swing_last,
+            latest_minute_close=_swing_minute_close,
+            spread_bps=_swing_spread_bps,
+            session_vwap=_swing_vwap,
+            rel_volume_5m=_swing_rel_volume,
+            intraday_high=intraday_high,
+            intraday_low=intraday_low,
+            prev_close=prev_close_daily,
+            prev_high=prev_high_daily,
+            prev_low=prev_low_daily,
+            prev_daily_range=(prev_high_daily - prev_low_daily) if prev_high_daily and prev_low_daily else None,
+            day_2_low=day_2_low_daily,
+            avg_daily_dollar_volume=avg_daily_dollar_vol,
+            gap_pct_from_prev_close=gap_pct_swing,
+            close_position_in_range_pct=close_pos_pct,
+            extension_from_reference_pct=ext_pct,
+            news_side=news_side,
+            news_keyword_hits=keyword_hits,
+            scrappy_catalyst_direction=scrappy_dir,
+            scrappy_catalyst_strength=scrappy_str,
+            scrappy_stale=scrappy_stale,
+            scrappy_conflict=scrappy_conflict,
+        )
+        swing_eval = evaluate_swing_event_continuation(
+            swing_features,
+            entry_start_et=strategy_config.entry_start_et,
+            entry_end_et=strategy_config.entry_end_et,
+        )
+        # Map SwingEvalResult to match the EvalResult interface used below
+        if swing_eval.side is not None and swing_eval.passes_filters:
+            eval_result = type('EvalResult', (), {
+                'side': swing_eval.side,
+                'reason_codes': swing_eval.reason_codes,
+                'feature_snapshot': swing_eval.feature_snapshot,
+                'passes_filters': swing_eval.passes_filters,
+                'reject_reason': swing_eval.reject_reason,
+            })()
+        else:
+            # Record rejection
+            if swing_eval.reject_reason:
+                logger.info("candidate_rejected symbol=%s strategy=%s reason_code=%s", symbol, strategy_id, swing_eval.reject_reason)
+                try:
+                    rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{swing_eval.reject_reason}"
+                    await redis_client.incr(rejection_key)
+                    await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                except Exception:
+                    pass
+            return False
+    else:
+        logger.warning("unknown_strategy strategy_id=%s symbol=%s", strategy_id, symbol)
+        return False
+    
+    if eval_result is None:
+        return False
+    
+    # Log and persist rejections
+    if eval_result.side is None or not eval_result.passes_filters:
+        if eval_result.reject_reason:
+            logger.info(
+                "candidate_rejected symbol=%s strategy=%s reason_code=%s",
+                symbol, strategy_id, eval_result.reject_reason,
+            )
+            # Persist strategy-specific rejection to Redis
+            try:
+                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{eval_result.reject_reason}"
+                await redis_client.incr(rejection_key)
+                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{symbol}:{eval_result.reject_reason}"
+                await redis_client.incr(symbol_rejection_key)
+                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+            except Exception as e:
+                logger.debug("rejection_summary_persist_failed symbol=%s strategy=%s reason=%s error=%s", symbol, strategy_id, eval_result.reject_reason, e)
+        return False
+    
+    # Scrappy gating: reject or tag
+    if eval_result.side is not None:
+        async def _record_rejection(reason_code: str) -> None:
+            try:
+                from stockbot.scrappy.store import insert_gate_rejection
+                factory = get_session_factory()
+                async with factory() as session:
+                    await insert_gate_rejection(session, symbol, reason_code, scrappy_mode=scrappy_mode)
+            except Exception as e:
+                logger.debug("gate_rejection_persist_failed symbol=%s reason=%s error=%s", symbol, reason_code, e)
+        
+        reject_reason = scrappy_gate_check(snapshot_row, eval_result.side, scrappy_mode)
+        if reject_reason:
+            await _record_rejection(reject_reason)
+            logger.info("candidate_rejected symbol=%s strategy=%s reason_code=%s", symbol, strategy_id, reject_reason)
+            # Persist Scrappy gate rejections
+            try:
+                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{reject_reason}"
+                await redis_client.incr(rejection_key)
+                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{symbol}:{reject_reason}"
+                await redis_client.incr(symbol_rejection_key)
+                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+            except Exception as e:
+                logger.debug("scrappy_rejection_summary_persist_failed symbol=%s strategy=%s reason=%s error=%s", symbol, strategy_id, reject_reason, e)
+            return False
+        
+        # Tag with Scrappy direction if available
+        direction = getattr(snapshot_row, "catalyst_direction", "neutral") if snapshot_row else "neutral"
+        if snapshot_row:
+            if direction == "positive":
+                eval_result.reason_codes.append("scrappy_positive")
+            elif direction == "negative":
+                eval_result.reason_codes.append("scrappy_negative")
+            else:
+                eval_result.reason_codes.append("scrappy_neutral")
+    
+    # AI Referee (same logic as before, but with strategy_id/version)
+    ai_referee_assessment_id: int | None = None
+    ai_referee_mode = getattr(settings, "ai_referee_mode", "off").strip().lower()
+    ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
+    if ai_referee_enabled and ai_referee_mode != "off":
+        try:
+            from stockbot.ai_referee.service import assess_setup
+            from stockbot.ai_referee.store import insert_assessment
+            from stockbot.ai_referee.types import RefereeInput
+            from stockbot.scrappy.store import get_recent_notes
+            
+            headlines: list[str] = []
+            if snapshot_row and getattr(snapshot_row, "headline_set_json", None):
+                headlines = list(snapshot_row.headline_set_json or [])[: getattr(settings, "ai_referee_max_input_headlines", 20)]
+            if not headlines and sym_state.news:
+                headlines = [n.headline or "" for n in sym_state.news[-20:]]
+            
+            notes_summary: list[str] = []
+            try:
+                factory = get_session_factory()
+                async with factory() as session:
+                    notes = await get_recent_notes(session, limit=getattr(settings, "ai_referee_max_input_notes", 30), symbol=symbol)
+                    notes_summary = [f"{n.title or ''}: {n.summary or ''}"[:200] for n in notes]
+            except Exception:
+                pass
+            
+            inp = RefereeInput(
+                symbol=symbol,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                scrappy_snapshot_id=snapshot_row.id if snapshot_row else None,
+                scrappy_run_id=getattr(snapshot_row, "scrappy_run_id", None) if snapshot_row else None,
+                scrappy_headlines=headlines,
+                scrappy_notes_summary=notes_summary,
+                feature_snapshot=eval_result.feature_snapshot or {},
+                quote_snapshot={"bid": str(sym_state.latest_bid), "ask": str(sym_state.latest_ask), "last": str(sym_state.latest_last)},
+                news_snapshot={"news_side": news_side, "keyword_hits": keyword_hits},
+                candidate_side="buy" if eval_result.side == "buy" else "sell",
+            )
+            assessment = await assess_setup(
+                inp,
+                api_key=getattr(settings, "openai_api_key", "") or "",
+                model=getattr(settings, "ai_referee_model", "gpt-4o-mini"),
+                timeout_seconds=getattr(settings, "ai_referee_timeout_seconds", 15),
+                max_headlines=getattr(settings, "ai_referee_max_input_headlines", 20),
+                max_notes=getattr(settings, "ai_referee_max_input_notes", 30),
+                base_url=getattr(settings, "openai_base_url", None),
+                require_json=getattr(settings, "ai_referee_require_json", True),
+                auth_mode=getattr(settings, "ai_referee_auth", "api_key"),
+            )
+            if assessment:
+                factory = get_session_factory()
+                async with factory() as session:
+                    ai_referee_assessment_id = await insert_assessment(session, assessment)
+                if ai_referee_mode == "required":
+                    if assessment.decision_class not in ("allow", "downgrade"):
+                        async def _record_ai_rejection(reason: str) -> None:
+                            try:
+                                from stockbot.scrappy.store import insert_gate_rejection
+                                factory = get_session_factory()
+                                async with factory() as session:
+                                    await insert_gate_rejection(session, symbol, reason, scrappy_mode=scrappy_mode)
+                            except Exception as e:
+                                logger.debug("ai_referee_rejection_persist_failed symbol=%s error=%s", symbol, e)
+                        ai_reject_reason = "ai_referee_block" if assessment.decision_class == "block" else "ai_referee_review"
+                        await _record_ai_rejection(ai_reject_reason)
+                        logger.info("candidate_rejected symbol=%s strategy=%s reason_code=%s", symbol, strategy_id, assessment.decision_class)
+                        try:
+                            rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{ai_reject_reason}"
+                            await redis_client.incr(rejection_key)
+                            await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                            symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{symbol}:{ai_reject_reason}"
+                            await redis_client.incr(symbol_rejection_key)
+                            await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                        except Exception as e:
+                            logger.debug("ai_referee_rejection_summary_persist_failed symbol=%s strategy=%s reason=%s error=%s", symbol, strategy_id, ai_reject_reason, e)
+                        return False
+                    if assessment.decision_class == "downgrade":
+                        eval_result.reason_codes.append("ai_referee_downgrade")
+                    else:
+                        eval_result.reason_codes.append("ai_referee_allow")
+                else:
+                    eval_result.reason_codes.append(f"ai_referee_{assessment.decision_class}")
+                if assessment.contradiction_flag:
+                    eval_result.reason_codes.append("ai_referee_contradiction")
+                if assessment.stale_flag:
+                    eval_result.reason_codes.append("ai_referee_stale")
+                if assessment.evidence_sufficiency == "low":
+                    eval_result.reason_codes.append("ai_referee_low_evidence")
+            else:
+                if ai_referee_mode == "required":
+                    try:
+                        from stockbot.scrappy.store import insert_gate_rejection
+                        factory = get_session_factory()
+                        async with factory() as session:
+                            await insert_gate_rejection(session, symbol, "ai_referee_error", scrappy_mode=scrappy_mode)
+                    except Exception:
+                        pass
+                    logger.info("candidate_rejected symbol=%s strategy=%s reason_code=ai_referee_error", symbol, strategy_id)
+                    try:
+                        rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:ai_referee_error"
+                        await redis_client.incr(rejection_key)
+                        await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                        symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:{symbol}:ai_referee_error"
+                        await redis_client.incr(symbol_rejection_key)
+                        await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                    except Exception as e:
+                        logger.debug("ai_referee_error_rejection_summary_persist_failed symbol=%s strategy=%s error=%s", symbol, strategy_id, e)
+                    return False
+                eval_result.reason_codes.append("ai_referee_error")
+        except Exception as e:
+            logger.debug("ai_referee_failed symbol=%s strategy=%s error=%s", symbol, strategy_id, e)
+            if ai_referee_mode == "required":
+                try:
+                    from stockbot.scrappy.store import insert_gate_rejection
+                    factory = get_session_factory()
+                    async with factory() as session:
+                        await insert_gate_rejection(session, symbol, "ai_referee_error", scrappy_mode=scrappy_mode)
+                except Exception:
+                    pass
+                return False
+            eval_result.reason_codes.append("ai_referee_error")
+    
+    # Compute stop/target with strategy-specific function
+    bid = sym_state.latest_bid or last_bar.close
+    ask = sym_state.latest_ask or last_bar.close
+    if not bid or not ask:
+        return False
+    
+    signal_uuid = uuid4()
+    side_str = "buy" if eval_result.side == "buy" else "sell"
+    ideal_entry = compute_entry_fill(eval_result.side, bid, ask, ShadowFillParams("ideal", 0, Decimal("0")))
+    real_entry = compute_entry_fill(eval_result.side, bid, ask, ShadowFillParams("realistic", slippage_bps, fee_per_share))
+    
+    # Strategy-specific stop/target calculation
+    if strategy_id == OPEN_DRIVE_MOMO_ID:
+        stop_price, target_price = exit_stop_target_open_drive_momo(eval_result.side, or_high, or_low, real_entry, 2.0)
+    elif strategy_id == INTRADAY_CONTINUATION_ID:
+        session_high_val_final = session_high_val if 'session_high_val' in locals() else or_high
+        session_low_val_final = session_low_val if 'session_low_val' in locals() else or_low
+        stop_price, target_price = exit_stop_target_intraday_continuation(
+            eval_result.side, real_entry, session_high_val_final, session_low_val_final, vwap, 2.0
+        )
+    elif strategy_id == INTRA_EVENT_MOMO_ID:
+        stop_price, target_price = exit_stop_target_intra_event_momo(eval_result.side, or_high, or_low, real_entry, 2.0)
+    elif strategy_id == SWING_EVENT_CONTINUATION_ID:
+        _prev_low = prev_low_daily if 'prev_low_daily' in locals() else None
+        _day_2_low = day_2_low_daily if 'day_2_low_daily' in locals() else None
+        _prev_high = prev_high_daily if 'prev_high_daily' in locals() else None
+        stop_price, target_price = compute_stop_target_swing(
+            eval_result.side, real_entry, _prev_low, _day_2_low, _prev_high,
+        )
+    else:
+        if eval_result.side == "buy":
+            stop_price = real_entry * Decimal("0.98")
+            target_price = real_entry * Decimal("1.02")
+        else:
+            stop_price = real_entry * Decimal("1.02")
+            target_price = real_entry * Decimal("0.98")
+    
+    # Paper execution logic (only if strategy allows paper)
+    qty = Decimal("100")
+    execution_mode_val = getattr(settings, "execution_mode", "shadow")
+    paper_enabled = getattr(settings, "paper_execution_enabled", False)
+    paper_armed_config = getattr(settings, "paper_trading_armed", False)
+    try:
+        paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
+    except Exception:
+        paper_armed_redis = False
+    paper_armed = paper_armed_config and paper_armed_redis and strategy_config.paper_enabled  # Strategy must allow paper
+    
+    order_type_default = getattr(settings, "order_type_default", "market") or "market"
+    # Block strategy paper if gateway or worker is on static fallback
+    if execution_mode_val == "paper" and paper_enabled and paper_armed:
+        allow, block_reason = await _paper_allowed_universe(redis_client)
+        if not allow:
+            if eval_result.reason_codes is None:
+                eval_result.reason_codes = []
+            eval_result.reason_codes.append(block_reason or "paper_blocked_static_fallback")
+            paper_armed = False
+    
+    # Sizing (paper mode only)
+    sizing_details: dict[str, Any] | None = None
+    if execution_mode_val == "paper" and paper_enabled and paper_armed:
+        def _get_account_positions_and_size() -> tuple[Decimal, str | None, dict[str, Any] | None]:
+            from stockbot.alpaca.client import AlpacaClient
+            try:
+                client = AlpacaClient()
+                acc = client.get_account()
+                positions = client.list_positions()
+                equity = Decimal(str(acc.get("equity") or 0))
+                buying_power = Decimal(str(acc.get("buying_power") or 0))
+                if equity <= 0:
+                    return (Decimal("100"), "paper_order_skipped_no_account_state", None)
+                stop_dist = abs(real_entry - stop_price)
+                is_swing = strategy_config.holding_period_type == "swing"
+                risk_per_trade_pct = getattr(settings, "swing_risk_per_trade_pct_equity", 0.25) if is_swing else getattr(settings, "risk_per_trade_pct_equity", 0.5)
+                max_position_pct = getattr(settings, "swing_max_position_pct_equity", 5.0) if is_swing else getattr(settings, "max_position_pct_equity", 10.0)
+                max_concurrent = getattr(settings, "swing_max_concurrent_positions", 3) if is_swing else getattr(settings, "max_concurrent_positions", 5)
+                max_gross_pct = getattr(settings, "swing_max_gross_exposure_pct_equity", 20.0) if is_swing else getattr(settings, "max_gross_exposure_pct_equity", 50.0)
+                max_symbol_pct = getattr(settings, "swing_max_symbol_exposure_pct_equity", 10.0) if is_swing else getattr(settings, "max_symbol_exposure_pct_equity", 20.0)
+                sizing = compute_sizing(
+                    equity=equity,
+                    buying_power=buying_power,
+                    positions=positions,
+                    symbol=symbol,
+                    side=side_str,
+                    stop_distance_per_share=stop_dist,
+                    intended_entry_price=real_entry,
+                    allow_shorts=getattr(settings, "paper_allow_shorts", False),
+                    risk_per_trade_pct_equity=risk_per_trade_pct,
+                    max_position_pct_equity=max_position_pct,
+                    max_concurrent_positions=max_concurrent,
+                    max_gross_exposure_pct_equity=max_gross_pct,
+                    max_symbol_exposure_pct_equity=max_symbol_pct,
+                )
+                details = {
+                    "equity": equity,
+                    "buying_power": buying_power,
+                    "stop_distance": stop_dist,
+                    "risk_per_trade_pct": Decimal(str(risk_per_trade_pct)),
+                    "max_position_pct": Decimal(str(max_position_pct)),
+                    "max_gross_exposure_pct": Decimal(str(max_gross_pct)),
+                    "max_symbol_exposure_pct": Decimal(str(max_symbol_pct)),
+                    "max_concurrent_positions": max_concurrent,
+                    "qty_proposed": sizing.qty,
+                    "qty_approved": sizing.qty if sizing.approved else Decimal("0"),
+                    "notional_approved": sizing.notional if sizing.approved else None,
+                    "rejection_reason": sizing.rejection_reason,
+                }
+                if sizing.approved and sizing.qty > 0:
+                    return (sizing.qty, None, details)
+                return (Decimal("100"), sizing.rejection_reason or "paper_order_blocked_by_risk", details)
+            except Exception as e:
+                logger.warning("paper_sizing_failed symbol=%s strategy=%s error=%s", symbol, strategy_id, e)
+                return (Decimal("100"), "paper_order_skipped_broker_unavailable", None)
+        sized_qty, paper_reject, sizing_details = await asyncio.to_thread(_get_account_positions_and_size)
+        qty = sized_qty
+        if paper_reject:
+            logger.info("paper_order_skipped symbol=%s strategy=%s reason=%s", symbol, strategy_id, paper_reject)
+            eval_result.reason_codes.append(paper_reject)
+    
+    # Persist signal
+    factory = get_session_factory()
+    async with factory() as session:
+        store = LedgerStore(session)
+        event = SignalEvent(
+            signal_uuid=signal_uuid,
+            symbol=symbol,
+            side=side_str,
+            qty=qty,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            feed="iex",
+            quote_ts=last_bar.timestamp,
+            ingest_ts=datetime.now(UTC),
+            bid=bid,
+            ask=ask,
+            last=sym_state.latest_last,
+            spread_bps=features.spread_bps,
+            latency_ms=None,
+            reason_codes=eval_result.reason_codes,
+            feature_snapshot_json=eval_result.feature_snapshot,
+            quote_snapshot_json={"bid": str(bid), "ask": str(ask), "last": str(sym_state.latest_last)},
+            news_snapshot_json={"news_side": news_side, "keyword_hits": keyword_hits},
+            intelligence_snapshot_id=snapshot_row.id if snapshot_row else None,
+            scrappy_mode=scrappy_mode,
+            ai_referee_assessment_id=ai_referee_assessment_id,
+        )
+        await store.insert_signal(event)
+    
+    # Compute entry date for lifecycle and shadow position
+    import zoneinfo as _zi
+    _et_tz = _zi.ZoneInfo("America/New_York")
+    _entry_date_str = last_bar.timestamp.astimezone(_et_tz).strftime("%Y-%m-%d") if last_bar.timestamp else ""
+    
+    # Persist paper lifecycle (if paper-enabled)
+    _skip_paper = any(
+        rc.startswith("paper_order_skipped") or rc.startswith("paper_order_blocked")
+        for rc in (eval_result.reason_codes or [])
+    )
+    if execution_mode_val == "paper" and paper_enabled and paper_armed and not _skip_paper:
+        try:
+            universe_source_val = await redis_client.get(REDIS_KEY_WORKER_UNIVERSE_SOURCE) or "dynamic"
+            paper_armed_reason_val = "armed" if paper_armed else "disarmed"
+            force_flat_time_val = strategy_config.force_flat_et
+            protection_mode_val = "worker_mirrored"
+            factory_lifecycle = get_session_factory()
+            async with factory_lifecycle() as session_lifecycle:
+                store_lifecycle = LedgerStore(session_lifecycle)
+                await store_lifecycle.insert_paper_lifecycle(
+                    signal_uuid=signal_uuid,
+                    symbol=symbol,
+                    side=side_str,
+                    qty=qty,
+                    strategy_id=strategy_id,
+                    strategy_version=strategy_version,
+                    entry_ts=last_bar.timestamp,
+                    entry_price=real_entry,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    force_flat_time=force_flat_time_val,
+                    protection_mode=protection_mode_val,
+                    intelligence_snapshot_id=snapshot_row.id if snapshot_row else None,
+                    ai_referee_assessment_id=ai_referee_assessment_id,
+                    sizing_equity=sizing_details.get("equity") if sizing_details else None,
+                    sizing_buying_power=sizing_details.get("buying_power") if sizing_details else None,
+                    sizing_stop_distance=sizing_details.get("stop_distance") if sizing_details else None,
+                    sizing_risk_per_trade_pct=sizing_details.get("risk_per_trade_pct") if sizing_details else None,
+                    sizing_max_position_pct=sizing_details.get("max_position_pct") if sizing_details else None,
+                    sizing_max_gross_exposure_pct=sizing_details.get("max_gross_exposure_pct") if sizing_details else None,
+                    sizing_max_symbol_exposure_pct=sizing_details.get("max_symbol_exposure_pct") if sizing_details else None,
+                    sizing_max_concurrent_positions=sizing_details.get("max_concurrent_positions") if sizing_details else None,
+                    sizing_qty_proposed=sizing_details.get("qty_proposed") if sizing_details else None,
+                    sizing_qty_approved=sizing_details.get("qty_approved") if sizing_details else qty,
+                    sizing_notional_approved=sizing_details.get("notional_approved") if sizing_details else None,
+                    sizing_rejection_reason=sizing_details.get("rejection_reason") if sizing_details else None,
+                    universe_source=universe_source_val,
+                    paper_armed=paper_armed,
+                    paper_armed_reason=paper_armed_reason_val,
+                    lifecycle_status="planned",
+                    holding_period_type=strategy_config.holding_period_type,
+                    max_hold_days=strategy_config.max_hold_days,
+                    entry_date=_entry_date_str,
+                    scheduled_exit_date=_compute_scheduled_exit_date(_entry_date_str, strategy_config.max_hold_days) if strategy_config.max_hold_days > 0 else None,
+                    overnight_carry=strategy_config.holding_period_type == "swing",
+                )
+            logger.info("paper_lifecycle_persisted symbol=%s strategy=%s signal_uuid=%s holding=%s", symbol, strategy_id, str(signal_uuid), strategy_config.holding_period_type)
+        except Exception as e:
+            logger.warning("paper_lifecycle_persist_failed symbol=%s strategy=%s error=%s", symbol, strategy_id, e)
+    
+    # Paper order submission
+    if execution_mode_val == "paper" and paper_enabled and paper_armed and not _skip_paper:
+        ok, order_id, reason = await asyncio.to_thread(
+            _submit_paper_order, str(signal_uuid), symbol, side_str, qty, order_type_default
+        )
+        if ok and order_id:
+            factory2 = get_session_factory()
+            async with factory2() as session2:
+                store2 = LedgerStore(session2)
+                await store2.update_signal_paper_order(signal_uuid, order_id, "paper")
+                await store2.update_paper_lifecycle_entry_order(signal_uuid, order_id, "entry_submitted")
+            logger.info("paper_order_submitted symbol=%s strategy=%s order_id=%s signal_uuid=%s", symbol, strategy_id, order_id, str(signal_uuid))
+        else:
+            logger.info("paper_order_failed symbol=%s strategy=%s reason=%s", symbol, strategy_id, reason)
+            if eval_result.reason_codes is None:
+                eval_result.reason_codes = []
+            eval_result.reason_codes.append(reason or "paper_order_rejected")
+            try:
+                factory_err = get_session_factory()
+                async with factory_err() as session_err:
+                    store_err = LedgerStore(session_err)
+                    await store_err.update_paper_lifecycle_error(signal_uuid, reason or "paper_order_rejected", "blocked")
+            except Exception:
+                pass
+    
+    # Open shadow position
+    shadow_state.open_position(ShadowPosition(
+        signal_uuid=signal_uuid,
+        symbol=symbol,
+        side="buy" if eval_result.side == "buy" else "sell",
+        qty=qty,
+        entry_ts=last_bar.timestamp,
+        ideal_entry_price=ideal_entry,
+        realistic_entry_price=real_entry,
+        stop_price=stop_price,
+        target_price=target_price,
+        slippage_bps=slippage_bps,
+        fee_per_share=fee_per_share,
+        holding_period_type=strategy_config.holding_period_type,
+        max_hold_days=strategy_config.max_hold_days,
+        strategy_id=strategy_id,
+        entry_date=_entry_date_str,
+    ))
+    
+    # Mark symbol as traded by this strategy
+    await redis_client.sadd(traded_today_key, strategy_traded_key)
+    
+    logger.info(
+        "signal_emitted symbol=%s strategy=%s side=%s signal_uuid=%s reason_codes=%s",
+        symbol, strategy_id, eval_result.side, str(signal_uuid), eval_result.reason_codes,
+    )
+    logger.info(
+        "shadow_opened symbol=%s strategy=%s side=%s signal_uuid=%s stop=%s target=%s",
+        symbol, strategy_id, eval_result.side, str(signal_uuid), str(stop_price), str(target_price),
+    )
+    
+    return True
+
+
+def _compute_scheduled_exit_date(entry_date: str, max_hold_days: int) -> str | None:
+    """Compute the max exit date by adding trading days to entry date."""
+    if not entry_date or max_hold_days <= 0:
+        return None
+    try:
+        from datetime import date, timedelta
+        d = date.fromisoformat(entry_date)
+        trading_days_added = 0
+        while trading_days_added < max_hold_days:
+            d += timedelta(days=1)
+            if d.weekday() < 5:
+                trading_days_added += 1
+        return d.isoformat()
+    except Exception:
+        return None
 
 
 def _parse_bar_from_payload(payload: dict) -> BarLike | None:
@@ -425,9 +1176,11 @@ async def run_worker() -> None:
             len(universe),
         )
     else:
+        strategy_configs = _get_strategy_configs(settings)
+        enabled_strategies = [c.strategy_id for c in strategy_configs if c.enabled]
         logger.info(
-            "worker_connected strategy=%s version=%s universe_size=%s source=%s feed=iex",
-            STRATEGY_ID, STRATEGY_VERSION, len(universe), universe_source,
+            "worker_connected strategies=%s universe_size=%s source=%s feed=iex",
+            ",".join(enabled_strategies), len(universe), universe_source,
         )
 
     slippage_bps = settings.shadow_slippage_bps
@@ -566,8 +1319,6 @@ async def _on_bar(
 ) -> None:
     """On completed minute bar: force-flat check, exit check, then entry evaluation."""
     symbol = sym_state.symbol
-    entry_start = getattr(settings, "entry_start_et", "09:35")
-    entry_end = getattr(settings, "entry_end_et", "11:30")
     force_flat = getattr(settings, "force_flat_et", "15:45")
     scrappy_mode = getattr(settings, "scrappy_mode", "advisory").strip().lower()
 
@@ -575,11 +1326,10 @@ async def _on_bar(
     if not last_bar:
         return
 
-    # Force flat at or after force_flat_et: close any open position at market
+    # Force flat at or after force_flat_et: close INTRADAY positions only. Swing positions skip force-flat.
     if _et_time_after(last_bar.timestamp, force_flat) and shadow_state.has_position(symbol):
         pos = shadow_state.get_position(symbol)
-        if pos:
-            # Paper mode: submit close order to Alpaca (requires config + Redis armed; no static fallback)
+        if pos and pos.holding_period_type != "swing":
             execution_mode = getattr(settings, "execution_mode", "shadow")
             paper_enabled = getattr(settings, "paper_execution_enabled", False)
             paper_armed_config = getattr(settings, "paper_trading_armed", False)
@@ -592,7 +1342,6 @@ async def _on_bar(
             if execution_mode == "paper" and paper_enabled and paper_armed:
                 allow, block_reason = await _paper_allowed_universe(redis_client)
                 if allow:
-                    # Submit paper exit order for force-flat
                     ok, exit_order_id_force_flat, exit_reason_code = await asyncio.to_thread(
                         _submit_paper_exit_order,
                         str(pos.signal_uuid),
@@ -611,7 +1360,6 @@ async def _on_bar(
                             "paper_force_flat_failed symbol=%s reason=%s signal_uuid=%s",
                             symbol, exit_reason_code, str(pos.signal_uuid),
                         )
-                    # Also call legacy force-flat function for compatibility
                     await asyncio.to_thread(_paper_force_flat_close, symbol)
                 else:
                     logger.warning("paper_force_flat_skipped symbol=%s reason=%s", symbol, block_reason)
@@ -644,7 +1392,6 @@ async def _on_bar(
                         fee_per_share=rec["fee_per_share"],
                         scrappy_mode=scrappy_mode,
                     )
-                # Update lifecycle for force-flat exit
                 if execution_mode == "paper" and paper_enabled and paper_armed and exit_order_id_force_flat:
                     await store.update_paper_lifecycle_exit_order(
                         pos.signal_uuid, exit_order_id_force_flat, "force_flat", "exit_submitted"
@@ -655,7 +1402,48 @@ async def _on_bar(
                 "shadow_closed symbol=%s exit_reason=force_flat signal_uuid=%s",
                 symbol, str(pos.signal_uuid),
             )
-        return
+            return
+        # Swing position: don't force-flat, fall through to stop/target check
+
+    # Check max-hold exit for swing positions
+    if shadow_state.has_position(symbol):
+        pos = shadow_state.get_position(symbol)
+        if pos and pos.holding_period_type == "swing" and pos.max_hold_days > 0 and pos.entry_date:
+            try:
+                import zoneinfo as _zi2
+                _et_tz2 = _zi2.ZoneInfo("America/New_York")
+                _today_str = last_bar.timestamp.astimezone(_et_tz2).strftime("%Y-%m-%d")
+                from datetime import date as _date_cls
+                _entry_d = _date_cls.fromisoformat(pos.entry_date)
+                _today_d = _date_cls.fromisoformat(_today_str)
+                _trading_days = sum(1 for i in range((_today_d - _entry_d).days) if (_entry_d + timedelta(days=i+1)).weekday() < 5)
+                if _trading_days >= pos.max_hold_days:
+                    bid = sym_state.latest_bid or last_bar.close
+                    ask = sym_state.latest_ask or last_bar.close
+                    exit_price_ideal = compute_exit_fill(pos.side, bid, ask, ShadowFillParams("ideal", 0, Decimal("0")))
+                    exit_price_realistic = compute_exit_fill(pos.side, bid, ask, ShadowFillParams("realistic", slippage_bps, fee_per_share))
+                    exit_ts = last_bar.timestamp
+                    records = close_shadow_position(pos, exit_ts, exit_price_ideal, exit_price_realistic, "max_hold_reached")
+                    factory = get_session_factory()
+                    async with factory() as session:
+                        store = LedgerStore(session)
+                        for rec in records:
+                            await store.insert_shadow_trade(
+                                signal_uuid=UUID(rec["signal_uuid"]),
+                                execution_mode=rec["execution_mode"],
+                                entry_ts=rec["entry_ts"], exit_ts=rec["exit_ts"],
+                                entry_price=rec["entry_price"], exit_price=rec["exit_price"],
+                                stop_price=rec["stop_price"], target_price=rec["target_price"],
+                                exit_reason=rec["exit_reason"], qty=rec["qty"],
+                                gross_pnl=rec["gross_pnl"], net_pnl=rec["net_pnl"],
+                                slippage_bps=rec["slippage_bps"], fee_per_share=rec["fee_per_share"],
+                                scrappy_mode=scrappy_mode,
+                            )
+                    shadow_state.close_position(symbol)
+                    logger.info("shadow_closed symbol=%s exit_reason=max_hold_reached days=%s signal_uuid=%s", symbol, _trading_days, str(pos.signal_uuid))
+                    return
+            except Exception as e:
+                logger.debug("swing_max_hold_check_failed symbol=%s error=%s", symbol, e)
 
     # Check stop/target exit for open shadow position
     if shadow_state.has_position(symbol):
@@ -742,11 +1530,24 @@ async def _on_bar(
                                 )
         return
 
-    # One trade per symbol per day (scheduler clears TRADED_TODAY_KEY at 04:00 ET)
-    traded = await redis_client.smembers(TRADED_TODAY_KEY)
-    if symbol in traded:
+    # Get strategy configs and active strategies for current time
+    strategy_configs = _get_strategy_configs(settings)
+    active_strategies = get_active_strategies(last_bar.timestamp, strategy_configs)
+    
+    if not active_strategies:
+        # No active strategies, skip evaluation
         return
-
+    
+    # Check if symbol already traded by any strategy today (build set of all traded keys)
+    all_traded_keys: set[str] = set()
+    for config in strategy_configs:
+        traded_today_key = get_traded_today_key(config.strategy_id)
+        try:
+            traded = await redis_client.smembers(traded_today_key)
+            all_traded_keys.update(traded)
+        except Exception:
+            pass
+    
     # Scrappy intelligence snapshot for gating (off | advisory | required)
     snapshot_row = None
     if scrappy_mode != "off":
@@ -759,14 +1560,16 @@ async def _on_bar(
             logger.debug("scrappy_snapshot_fetch_failed symbol=%s error=%s", symbol, e)
 
     or_high, or_low = sym_state.opening_range()
-    if or_high is None or or_low is None:
-        return
     prev_close = sym_state.prev_close or (sym_state.bars[0].open if sym_state.bars else None)
-    if prev_close is None:
+
+    # Intraday strategies require opening range and prev_close; swing can proceed without OR
+    has_intraday_prereqs = or_high is not None and or_low is not None and prev_close is not None
+    has_any_swing_active = any(c.holding_period_type == "swing" for c in active_strategies)
+    if not has_intraday_prereqs and not has_any_swing_active:
         return
 
     close = last_bar.close
-    gap_pct = ((close - prev_close) / prev_close * 100).quantize(Decimal("0.01")) if prev_close else Decimal("0")
+    gap_pct = ((close - prev_close) / prev_close * 100).quantize(Decimal("0.01")) if prev_close and prev_close != 0 else Decimal("0")
     spread_bps = 0
     if sym_state.latest_bid and sym_state.latest_ask and sym_state.latest_ask > 0:
         spread_bps = int((sym_state.latest_ask - sym_state.latest_bid) / sym_state.latest_ask * 10000)
@@ -783,419 +1586,80 @@ async def _on_bar(
         all_neg.extend(neg)
     keyword_hits = list(set(all_pos + all_neg))
 
-    features = FeatureSet(
-        symbol=symbol,
-        ts=last_bar.timestamp,
-        prev_close=prev_close,
-        gap_pct_from_prev_close=gap_pct,
-        spread_bps=spread_bps,
-        minute_dollar_volume=minute_dollar,
-        rel_volume_5m=rel_vol,
-        opening_range_high=or_high,
-        opening_range_low=or_low,
-        session_vwap=sym_state.session_vwap(),
-        latest_bid=sym_state.latest_bid,
-        latest_ask=sym_state.latest_ask,
-        latest_last=sym_state.latest_last,
-        latest_minute_close=close,
-        news_side=news_side,
-        news_keyword_hits=keyword_hits,
-    )
-    eval_result = evaluate(features, entry_start_et=entry_start, entry_end_et=entry_end, force_flat_et=force_flat)
-
-    if eval_result.side is None or not eval_result.passes_filters:
-        if eval_result.reject_reason:
-            logger.info(
-                "candidate_rejected symbol=%s reason_code=%s",
-                symbol, eval_result.reject_reason,
-            )
-            # Persist strategy-level rejection to Redis for API visibility
-            try:
-                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{eval_result.reject_reason}"
-                await redis_client.incr(rejection_key)
-                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                # Also track by symbol for detailed visibility
-                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{eval_result.reject_reason}"
-                await redis_client.incr(symbol_rejection_key)
-                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-            except Exception as e:
-                logger.debug("rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, eval_result.reject_reason, e)
-        return
-
-    # Scrappy gating: reject or tag
-    if eval_result.side is not None:
-        async def _record_rejection(reason_code: str) -> None:
-            try:
-                from stockbot.scrappy.store import insert_gate_rejection
-                factory = get_session_factory()
-                async with factory() as session:
-                    await insert_gate_rejection(session, symbol, reason_code, scrappy_mode=scrappy_mode)
-            except Exception as e:
-                logger.debug("gate_rejection_persist_failed symbol=%s reason=%s error=%s", symbol, reason_code, e)
-
-        reject_reason = scrappy_gate_check(snapshot_row, eval_result.side, scrappy_mode)
-        if reject_reason:
-            await _record_rejection(reject_reason)
-            logger.info("candidate_rejected symbol=%s reason_code=%s", symbol, reject_reason)
-            # Also persist Scrappy gate rejections to worker rejection summary for unified visibility
-            try:
-                rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{reject_reason}"
-                await redis_client.incr(rejection_key)
-                await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{reject_reason}"
-                await redis_client.incr(symbol_rejection_key)
-                await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-            except Exception as e:
-                logger.debug("scrappy_rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, reject_reason, e)
-            return
-        direction = getattr(snapshot_row, "catalyst_direction", "neutral") if snapshot_row else "neutral"
-        if snapshot_row:
-            if direction == "positive":
-                eval_result.reason_codes.append("scrappy_positive")
-            elif direction == "negative":
-                eval_result.reason_codes.append("scrappy_negative")
-            else:
-                eval_result.reason_codes.append("scrappy_neutral")
-
-    # AI_SETUP_REFEREE: bounded reasoning (off | advisory | required). No order authority.
-    ai_referee_assessment_id: int | None = None
-    ai_referee_mode = getattr(settings, "ai_referee_mode", "off").strip().lower()
-    ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
-    if ai_referee_enabled and ai_referee_mode != "off":
-        try:
-            from stockbot.ai_referee.service import assess_setup
-            from stockbot.ai_referee.store import insert_assessment
-            from stockbot.ai_referee.types import RefereeInput
-            from stockbot.scrappy.store import get_recent_notes
-
-            headlines: list[str] = []
-            if snapshot_row and getattr(snapshot_row, "headline_set_json", None):
-                headlines = list(snapshot_row.headline_set_json or [])[: getattr(settings, "ai_referee_max_input_headlines", 20)]
-            if not headlines and sym_state.news:
-                headlines = [n.headline or "" for n in sym_state.news[-20:]]
-
-            notes_summary: list[str] = []
-            try:
-                factory = get_session_factory()
-                async with factory() as session:
-                    notes = await get_recent_notes(session, limit=getattr(settings, "ai_referee_max_input_notes", 30), symbol=symbol)
-                    notes_summary = [f"{n.title or ''}: {n.summary or ''}"[:200] for n in notes]
-            except Exception:
-                pass
-
-            inp = RefereeInput(
-                symbol=symbol,
-                strategy_id=STRATEGY_ID,
-                strategy_version=STRATEGY_VERSION,
-                scrappy_snapshot_id=snapshot_row.id if snapshot_row else None,
-                scrappy_run_id=getattr(snapshot_row, "scrappy_run_id", None) if snapshot_row else None,
-                scrappy_headlines=headlines,
-                scrappy_notes_summary=notes_summary,
-                feature_snapshot=eval_result.feature_snapshot or {},
-                quote_snapshot={"bid": str(sym_state.latest_bid), "ask": str(sym_state.latest_ask), "last": str(sym_state.latest_last)},
-                news_snapshot={"news_side": news_side, "keyword_hits": keyword_hits},
-                candidate_side="buy" if eval_result.side == "buy" else "sell",
-            )
-            assessment = await assess_setup(
-                inp,
-                api_key=getattr(settings, "openai_api_key", "") or "",
-                model=getattr(settings, "ai_referee_model", "gpt-4o-mini"),
-                timeout_seconds=getattr(settings, "ai_referee_timeout_seconds", 15),
-                max_headlines=getattr(settings, "ai_referee_max_input_headlines", 20),
-                max_notes=getattr(settings, "ai_referee_max_input_notes", 30),
-                base_url=getattr(settings, "openai_base_url", None),
-                require_json=getattr(settings, "ai_referee_require_json", True),
-                auth_mode=getattr(settings, "ai_referee_auth", "api_key"),
-            )
-            if assessment:
-                factory = get_session_factory()
-                async with factory() as session:
-                    ai_referee_assessment_id = await insert_assessment(session, assessment)
-                if ai_referee_mode == "required":
-                    if assessment.decision_class not in ("allow", "downgrade"):
-                        async def _record_ai_rejection(reason: str) -> None:
-                            try:
-                                from stockbot.scrappy.store import insert_gate_rejection
-                                factory = get_session_factory()
-                                async with factory() as session:
-                                    await insert_gate_rejection(session, symbol, reason, scrappy_mode=scrappy_mode)
-                            except Exception as e:
-                                logger.debug("ai_referee_rejection_persist_failed symbol=%s error=%s", symbol, e)
-                        ai_reject_reason = "ai_referee_block" if assessment.decision_class == "block" else "ai_referee_review"
-                        await _record_ai_rejection(ai_reject_reason)
-                        logger.info("candidate_rejected symbol=%s reason_code=%s", symbol, assessment.decision_class)
-                        # Also persist AI Referee rejections to worker rejection summary
-                        try:
-                            rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{ai_reject_reason}"
-                            await redis_client.incr(rejection_key)
-                            await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                            symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:{ai_reject_reason}"
-                            await redis_client.incr(symbol_rejection_key)
-                            await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                        except Exception as e:
-                            logger.debug("ai_referee_rejection_summary_persist_failed symbol=%s reason=%s error=%s", symbol, ai_reject_reason, e)
-                        return
-                    if assessment.decision_class == "downgrade":
-                        eval_result.reason_codes.append("ai_referee_downgrade")
-                    else:
-                        eval_result.reason_codes.append("ai_referee_allow")
-                else:
-                    eval_result.reason_codes.append(
-                        f"ai_referee_{assessment.decision_class}"
-                    )
-                if assessment.contradiction_flag:
-                    eval_result.reason_codes.append("ai_referee_contradiction")
-                if assessment.stale_flag:
-                    eval_result.reason_codes.append("ai_referee_stale")
-                if assessment.evidence_sufficiency == "low":
-                    eval_result.reason_codes.append("ai_referee_low_evidence")
-            else:
-                if ai_referee_mode == "required":
-                    try:
-                        from stockbot.scrappy.store import insert_gate_rejection
-                        factory = get_session_factory()
-                        async with factory() as session:
-                            await insert_gate_rejection(session, symbol, "ai_referee_error", scrappy_mode=scrappy_mode)
-                    except Exception:
-                        pass
-                    logger.info("candidate_rejected symbol=%s reason_code=ai_referee_error", symbol)
-                    # Also persist AI Referee error rejections to worker rejection summary
-                    try:
-                        rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:ai_referee_error"
-                        await redis_client.incr(rejection_key)
-                        await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                        symbol_rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{symbol}:ai_referee_error"
-                        await redis_client.incr(symbol_rejection_key)
-                        await redis_client.expire(symbol_rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
-                    except Exception as e:
-                        logger.debug("ai_referee_error_rejection_summary_persist_failed symbol=%s error=%s", symbol, e)
-                    return
-                eval_result.reason_codes.append("ai_referee_error")
-        except Exception as e:
-            logger.debug("ai_referee_failed symbol=%s error=%s", symbol, e)
-            if ai_referee_mode == "required":
-                try:
-                    from stockbot.scrappy.store import insert_gate_rejection
-                    factory = get_session_factory()
-                    async with factory() as session:
-                        await insert_gate_rejection(session, symbol, "ai_referee_error", scrappy_mode=scrappy_mode)
-                except Exception:
-                    pass
-                return
-            eval_result.reason_codes.append("ai_referee_error")
-
-    bid = sym_state.latest_bid or close
-    ask = sym_state.latest_ask or close
-    if not bid or not ask:
-        return
-
-    signal_uuid = uuid4()
-    side_str = "buy" if eval_result.side == "buy" else "sell"
-    ideal_entry = compute_entry_fill(eval_result.side, bid, ask, ShadowFillParams("ideal", 0, Decimal("0")))
-    real_entry = compute_entry_fill(eval_result.side, bid, ask, ShadowFillParams("realistic", slippage_bps, fee_per_share))
-    stop_price, target_price = exit_stop_target_prices(eval_result.side, or_high, or_low, real_entry, 2.0)
-
-    qty = Decimal("100")
-    execution_mode_val = getattr(settings, "execution_mode", "shadow")
-    paper_enabled = getattr(settings, "paper_execution_enabled", False)
-    paper_armed_config = getattr(settings, "paper_trading_armed", False)
-    try:
-        paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
-    except Exception:
-        paper_armed_redis = False
-    paper_armed = paper_armed_config and paper_armed_redis
-    order_type_default = getattr(settings, "order_type_default", "market") or "market"
-    # Block strategy paper if gateway or worker is on static fallback
-    if execution_mode_val == "paper" and paper_enabled and paper_armed:
-        allow, block_reason = await _paper_allowed_universe(redis_client)
-        if not allow:
-            if eval_result.reason_codes is None:
-                eval_result.reason_codes = []
-            eval_result.reason_codes.append(block_reason or "paper_blocked_static_fallback")
-            paper_armed = False  # skip paper sizing and submission below
-    # Capture sizing details for lifecycle persistence (paper mode only)
-    sizing_details: dict[str, Any] | None = None
-    if execution_mode_val == "paper" and paper_enabled and paper_armed:
-        def _get_account_positions_and_size() -> tuple[Decimal, str | None, dict[str, Any] | None]:
-            from stockbot.alpaca.client import AlpacaClient
-            try:
-                client = AlpacaClient()
-                acc = client.get_account()
-                positions = client.list_positions()
-                equity = Decimal(str(acc.get("equity") or 0))
-                buying_power = Decimal(str(acc.get("buying_power") or 0))
-                if equity <= 0:
-                    return (Decimal("100"), "paper_order_skipped_no_account_state", None)
-                stop_dist = abs(real_entry - stop_price)
-                risk_per_trade_pct = getattr(settings, "risk_per_trade_pct_equity", 0.5)
-                max_position_pct = getattr(settings, "max_position_pct_equity", 10.0)
-                max_concurrent = getattr(settings, "max_concurrent_positions", 5)
-                max_gross_pct = getattr(settings, "max_gross_exposure_pct_equity", 50.0)
-                max_symbol_pct = getattr(settings, "max_symbol_exposure_pct_equity", 20.0)
-                sizing = compute_sizing(
-                    equity=equity,
-                    buying_power=buying_power,
-                    positions=positions,
-                    symbol=symbol,
-                    side=side_str,
-                    stop_distance_per_share=stop_dist,
-                    intended_entry_price=real_entry,
-                    allow_shorts=getattr(settings, "paper_allow_shorts", False),
-                    risk_per_trade_pct_equity=risk_per_trade_pct,
-                    max_position_pct_equity=max_position_pct,
-                    max_concurrent_positions=max_concurrent,
-                    max_gross_exposure_pct_equity=max_gross_pct,
-                    max_symbol_exposure_pct_equity=max_symbol_pct,
-                )
-                details = {
-                    "equity": equity,
-                    "buying_power": buying_power,
-                    "stop_distance": stop_dist,
-                    "risk_per_trade_pct": Decimal(str(risk_per_trade_pct)),
-                    "max_position_pct": Decimal(str(max_position_pct)),
-                    "max_gross_exposure_pct": Decimal(str(max_gross_pct)),
-                    "max_symbol_exposure_pct": Decimal(str(max_symbol_pct)),
-                    "max_concurrent_positions": max_concurrent,
-                    "qty_proposed": sizing.qty,
-                    "qty_approved": sizing.qty if sizing.approved else Decimal("0"),
-                    "notional_approved": sizing.notional if sizing.approved else None,
-                    "rejection_reason": sizing.rejection_reason,
-                }
-                if sizing.approved and sizing.qty > 0:
-                    return (sizing.qty, None, details)
-                return (Decimal("100"), sizing.rejection_reason or "paper_order_blocked_by_risk", details)
-            except Exception as e:
-                logger.warning("paper_sizing_failed symbol=%s error=%s", symbol, e)
-                return (Decimal("100"), "paper_order_skipped_broker_unavailable", None)
-        sized_qty, paper_reject, sizing_details = await asyncio.to_thread(_get_account_positions_and_size)
-        qty = sized_qty
-        if paper_reject:
-            logger.info("paper_order_skipped symbol=%s reason=%s", symbol, paper_reject)
-            eval_result.reason_codes.append(paper_reject)
-
-    factory = get_session_factory()
-    async with factory() as session:
-        store = LedgerStore(session)
-        event = SignalEvent(
-            signal_uuid=signal_uuid,
+    # Build base feature set (shared across intraday strategies; swing builds its own)
+    features: FeatureSet | None = None
+    if has_intraday_prereqs:
+        features = FeatureSet(
             symbol=symbol,
-            side=side_str,
-            qty=qty,
-            strategy_id=STRATEGY_ID,
-            strategy_version=STRATEGY_VERSION,
-            feed="iex",
-            quote_ts=last_bar.timestamp,
-            ingest_ts=datetime.now(UTC),
-            bid=bid,
-            ask=ask,
-            last=sym_state.latest_last,
+            ts=last_bar.timestamp,
+            prev_close=prev_close,
+            gap_pct_from_prev_close=gap_pct,
             spread_bps=spread_bps,
-            latency_ms=None,
-            reason_codes=eval_result.reason_codes,
-            feature_snapshot_json=eval_result.feature_snapshot,
-            quote_snapshot_json={"bid": str(bid), "ask": str(ask), "last": str(sym_state.latest_last)},
-            news_snapshot_json={"news_side": news_side, "keyword_hits": keyword_hits},
-            intelligence_snapshot_id=snapshot_row.id if snapshot_row else None,
+            minute_dollar_volume=minute_dollar,
+            rel_volume_5m=rel_vol,
+            opening_range_high=or_high,
+            opening_range_low=or_low,
+            session_vwap=sym_state.session_vwap(),
+            latest_bid=sym_state.latest_bid,
+            latest_ask=sym_state.latest_ask,
+            latest_last=sym_state.latest_last,
+            latest_minute_close=close,
+            news_side=news_side,
+            news_keyword_hits=keyword_hits,
+        )
+    
+    # Build position conflict map for arbitration
+    open_positions_by_symbol = shadow_state.positions_by_symbol_strategy()
+
+    # Evaluate with each active strategy (priority order)
+    for strategy_config in active_strategies:
+        strategy_traded_key = f"{strategy_config.strategy_id}:{symbol}"
+        if strategy_traded_key in all_traded_keys:
+            continue
+
+        should_eval, reason = should_evaluate_strategy(
+            strategy_config.strategy_id,
+            symbol,
+            last_bar.timestamp,
+            all_traded_keys,
+            strategy_configs,
+        )
+        if not should_eval:
+            if reason:
+                logger.debug("strategy_skip symbol=%s strategy=%s reason=%s", symbol, strategy_config.strategy_id, reason)
+            continue
+
+        # Check for conflicting positions (swing vs intraday on same symbol)
+        conflict, conflict_reason = has_conflicting_position(
+            symbol, strategy_config.strategy_id, open_positions_by_symbol,
+        )
+        if conflict:
+            logger.debug("strategy_skip symbol=%s strategy=%s reason=%s", symbol, strategy_config.strategy_id, conflict_reason)
+            continue
+
+        # Intraday strategies need base features; swing builds its own
+        if strategy_config.holding_period_type != "swing" and features is None:
+            continue
+
+        # Evaluate with this strategy (swing uses features=None but builds SwingFeatureSet internally)
+        signal_emitted = await _evaluate_symbol_with_strategy(
+            redis_client=redis_client,
+            sym_state=sym_state,
+            shadow_state=shadow_state,
+            settings=settings,
+            fee_per_share=fee_per_share,
+            slippage_bps=slippage_bps,
+            strategy_config=strategy_config,
+            snapshot_row=snapshot_row,
             scrappy_mode=scrappy_mode,
-            ai_referee_assessment_id=ai_referee_assessment_id,
+            news_side=news_side,
+            keyword_hits=keyword_hits,
+            features=features,
+            last_bar=last_bar,
         )
-        await store.insert_signal(event)
 
-    # Persist paper lifecycle at entry time (before order submission)
-    if execution_mode_val == "paper" and paper_enabled and paper_armed and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
-        try:
-            universe_source_val = await redis_client.get(REDIS_KEY_WORKER_UNIVERSE_SOURCE) or "dynamic"
-            paper_armed_reason_val = "armed" if paper_armed else "disarmed"
-            force_flat_time_val = getattr(settings, "force_flat_et", "15:45")
-            protection_mode_val = "worker_mirrored"  # Alpaca paper doesn't support bracket orders easily, use worker-mirrored
-            factory_lifecycle = get_session_factory()
-            async with factory_lifecycle() as session_lifecycle:
-                store_lifecycle = LedgerStore(session_lifecycle)
-                await store_lifecycle.insert_paper_lifecycle(
-                    signal_uuid=signal_uuid,
-                    symbol=symbol,
-                    side=side_str,
-                    qty=qty,
-                    strategy_id=STRATEGY_ID,
-                    strategy_version=STRATEGY_VERSION,
-                    entry_ts=last_bar.timestamp,
-                    entry_price=real_entry,
-                    stop_price=stop_price,
-                    target_price=target_price,
-                    force_flat_time=force_flat_time_val,
-                    protection_mode=protection_mode_val,
-                    intelligence_snapshot_id=snapshot_row.id if snapshot_row else None,
-                    ai_referee_assessment_id=ai_referee_assessment_id,
-                    sizing_equity=sizing_details.get("equity") if sizing_details else None,
-                    sizing_buying_power=sizing_details.get("buying_power") if sizing_details else None,
-                    sizing_stop_distance=sizing_details.get("stop_distance") if sizing_details else None,
-                    sizing_risk_per_trade_pct=sizing_details.get("risk_per_trade_pct") if sizing_details else None,
-                    sizing_max_position_pct=sizing_details.get("max_position_pct") if sizing_details else None,
-                    sizing_max_gross_exposure_pct=sizing_details.get("max_gross_exposure_pct") if sizing_details else None,
-                    sizing_max_symbol_exposure_pct=sizing_details.get("max_symbol_exposure_pct") if sizing_details else None,
-                    sizing_max_concurrent_positions=sizing_details.get("max_concurrent_positions") if sizing_details else None,
-                    sizing_qty_proposed=sizing_details.get("qty_proposed") if sizing_details else None,
-                    sizing_qty_approved=sizing_details.get("qty_approved") if sizing_details else qty,
-                    sizing_notional_approved=sizing_details.get("notional_approved") if sizing_details else None,
-                    sizing_rejection_reason=sizing_details.get("rejection_reason") if sizing_details else None,
-                    universe_source=universe_source_val,
-                    paper_armed=paper_armed,
-                    paper_armed_reason=paper_armed_reason_val,
-                    lifecycle_status="planned",
-                )
-            logger.info("paper_lifecycle_persisted symbol=%s signal_uuid=%s", symbol, str(signal_uuid))
-        except Exception as e:
-            logger.warning("paper_lifecycle_persist_failed symbol=%s error=%s", symbol, e)
-
-    # Paper order submission after signal persisted (client_order_id = signal_uuid). Requires paper_trading_armed.
-    if execution_mode_val == "paper" and paper_enabled and paper_armed and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
-        ok, order_id, reason = await asyncio.to_thread(
-            _submit_paper_order, str(signal_uuid), symbol, side_str, qty, order_type_default
-        )
-        if ok and order_id:
-            factory2 = get_session_factory()
-            async with factory2() as session2:
-                store2 = LedgerStore(session2)
-                await store2.update_signal_paper_order(signal_uuid, order_id, "paper")
-                await store2.update_paper_lifecycle_entry_order(signal_uuid, order_id, "entry_submitted")
-            logger.info("paper_order_submitted symbol=%s order_id=%s signal_uuid=%s", symbol, order_id, str(signal_uuid))
-        else:
-            logger.info("paper_order_failed symbol=%s reason=%s", symbol, reason)
-            if eval_result.reason_codes is None:
-                eval_result.reason_codes = []
-            eval_result.reason_codes.append(reason or "paper_order_rejected")
-            # Update lifecycle with error
-            try:
-                factory_err = get_session_factory()
-                async with factory_err() as session_err:
-                    store_err = LedgerStore(session_err)
-                    await store_err.update_paper_lifecycle_error(signal_uuid, reason or "paper_order_rejected", "blocked")
-            except Exception:
-                pass
-
-    shadow_state.open_position(ShadowPosition(
-        signal_uuid=signal_uuid,
-        symbol=symbol,
-        side="buy" if eval_result.side == "buy" else "sell",
-        qty=qty,
-        entry_ts=last_bar.timestamp,
-        ideal_entry_price=ideal_entry,
-        realistic_entry_price=real_entry,
-        stop_price=stop_price,
-        target_price=target_price,
-        slippage_bps=slippage_bps,
-        fee_per_share=fee_per_share,
-    ))
-    await redis_client.sadd(TRADED_TODAY_KEY, symbol)
-
-    logger.info(
-        "signal_emitted symbol=%s side=%s signal_uuid=%s reason_codes=%s",
-        symbol, eval_result.side, str(signal_uuid), eval_result.reason_codes,
-    )
-    logger.info(
-        "shadow_opened symbol=%s side=%s signal_uuid=%s stop=%s target=%s",
-        symbol, eval_result.side, str(signal_uuid), str(stop_price), str(target_price),
-    )
+        if signal_emitted:
+            return
 
 
 def main() -> None:

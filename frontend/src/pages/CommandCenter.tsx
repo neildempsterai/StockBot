@@ -106,7 +106,9 @@ export function CommandCenter() {
     );
   }
 
-  const strategy = strategies?.strategies?.[0];
+  const allStrategies = strategies?.strategies ?? [];
+  const enabledStrategies = allStrategies.filter(s => s.enabled);
+  const swingStrategies = allStrategies.filter(s => s.holding_period_type === 'swing' && s.enabled);
   const apiOk = health?.status === 'ok';
 
   return (
@@ -125,6 +127,47 @@ export function CommandCenter() {
       <div className="info-note" style={{ marginBottom: '1rem', borderLeft: '3px solid var(--color-success)' }}>
         <strong>Automation:</strong> Scanner, Scrappy, opportunity engine, and strategy worker run on their own schedules. Manual triggers in Premarket Prep and Strategy Lab are for testing and research only.
       </div>
+
+      {/* Active Strategies */}
+      {allStrategies.length > 0 && (
+        <section className="dashboard-section">
+          <SectionHeader title="Active Strategies" subtitle="Enabled strategy lanes and rollout status" />
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>Version</th>
+                  <th>Type</th>
+                  <th>Entry Window (ET)</th>
+                  <th>Force Flat</th>
+                  <th>Shadow</th>
+                  <th>Paper</th>
+                  <th>Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allStrategies.map((s) => (
+                  <tr key={s.strategy_id}>
+                    <td className="cell--symbol">{s.strategy_id}</td>
+                    <td>{s.strategy_version ?? '—'}</td>
+                    <td>
+                      <span className={s.holding_period_type === 'swing' ? 'badge badge--swing' : 'badge badge--intraday'}>
+                        {s.holding_period_type === 'swing' ? `Swing (${s.max_hold_days ?? 5}d max)` : 'Intraday'}
+                      </span>
+                    </td>
+                    <td>{s.entry_window_et ?? '—'}</td>
+                    <td>{s.force_flat_et ?? 'None'}</td>
+                    <td><span className={s.enabled ? 'badge badge--green' : 'badge badge--dim'}>{s.enabled ? 'Yes' : 'No'}</span></td>
+                    <td><span className={s.paper_enabled ? 'badge badge--green' : 'badge badge--dim'}>{s.paper_enabled ? 'Yes' : 'No'}</span></td>
+                    <td style={{ fontSize: '0.75rem' }}>{s.note ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {/* Premarket Prep Summary */}
       <section className="dashboard-section">
@@ -233,12 +276,19 @@ export function CommandCenter() {
                 <strong>⚠ Warning:</strong> Some positions have no active protection. <Link to="/portfolio" className="link-mono">Review exit plans →</Link>
               </div>
             )}
-            <div className="grid-cards grid-cards--4">
+            <div className="grid-cards grid-cards--5">
               <KPICard title="Open Positions" value={paperExposure.positions.length} />
               <KPICard 
-                title="Orphaned/Unmanaged" 
-                value={paperExposure.positions.filter(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged').length}
-                valueClass={paperExposure.positions.some(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged') ? 'pnl--negative' : ''}
+                title="Intraday"
+                value={paperExposure.positions.filter(p => p.holding_period_type !== 'swing').length}
+              />
+              <KPICard 
+                title="Swing (Overnight)"
+                value={paperExposure.positions.filter(p => p.holding_period_type === 'swing').length}
+                valueClass={paperExposure.positions.some(p => p.holding_period_type === 'swing') ? 'pnl--positive' : ''}
+                subtitle={paperExposure.positions.filter(p => p.holding_period_type === 'swing').length > 0
+                  ? `${paperExposure.positions.filter(p => p.holding_period_type === 'swing' && p.overnight_carry).length} carrying overnight`
+                  : undefined}
               />
               <KPICard 
                 title="Managed" 
@@ -257,6 +307,7 @@ export function CommandCenter() {
                   <tr>
                     <th>Symbol</th>
                     <th>Side</th>
+                    <th>Type</th>
                     <th>Qty</th>
                     <th>Source</th>
                     <th>Managed</th>
@@ -274,6 +325,11 @@ export function CommandCenter() {
                       <td>
                         <span className={pos.side?.toLowerCase() === 'long' ? 'signal-side signal-side--buy' : 'signal-side signal-side--sell'}>
                           {pos.side?.toUpperCase()}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={pos.holding_period_type === 'swing' ? 'badge badge--swing' : 'badge badge--intraday'}>
+                          {pos.holding_period_type === 'swing' ? `Swing ${pos.days_held ?? 0}d/${pos.max_hold_days ?? 5}d` : 'Intraday'}
                         </span>
                       </td>
                       <td>{pos.qty}</td>
@@ -326,9 +382,9 @@ export function CommandCenter() {
             </div>
           </div>
           <KPICard
-            title="Strategy"
-            value={strategy ? strategy.strategy_id : '—'}
-            subtitle={strategy ? `v${strategy.strategy_version}` : undefined}
+            title="Strategies"
+            value={`${enabledStrategies.length} active`}
+            subtitle={swingStrategies.length > 0 ? `${swingStrategies.length} swing` : undefined}
           />
           <KPICard
             title="Session"
@@ -388,52 +444,92 @@ export function CommandCenter() {
                     <th>Gap %</th>
                     <th>Spread (bps)</th>
                     <th>Scrappy</th>
+                    <th>Strategy Eligibility</th>
                     <th>Reasons</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(opportunities?.opportunities ?? []).map((opp) => (
-                    <tr key={opp.symbol}>
-                      <td>{opp.rank}</td>
-                      <td>
-                        <Link to={`/scanner/symbol/${opp.symbol}`} className="link-mono">{opp.symbol}</Link>
-                      </td>
-                      <td>{opp.total_score != null ? Number(opp.total_score).toFixed(2) : '—'}</td>
-                      {(opportunities?.opportunities ?? []).some((o) => o.semantic_score != null) ? (
-                        <td>{opp.semantic_score != null ? Number(opp.semantic_score).toFixed(2) : '—'}</td>
-                      ) : null}
-                      {(opportunities?.opportunities ?? []).some((o) => o.candidate_source) ? (
-                        <td>{opp.candidate_source ?? '—'}</td>
-                      ) : null}
-                      <td>{opp.price != null ? `$${Number(opp.price).toFixed(2)}` : '—'}</td>
-                      <td>{opp.gap_pct != null ? `${Number(opp.gap_pct).toFixed(2)}%` : '—'}</td>
-                      <td>{opp.spread_bps != null ? opp.spread_bps : '—'}</td>
-                      <td>
-                        {opp.scrappy_present ? (
-                          <span style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', alignItems: 'flex-start' }}>
-                            <span>✓</span>
-                            {opp.scrappy_catalyst_direction && (
-                              <span className="badge badge--dim">{opp.scrappy_catalyst_direction}</span>
-                            )}
-                            {(opp.scrappy_stale_flag || opp.scrappy_conflict_flag) && (
-                              <span>
-                                {opp.scrappy_stale_flag && <span className="flag-badge flag-badge--warn">stale</span>}
-                                {opp.scrappy_conflict_flag && <span className="flag-badge flag-badge--warn">conflict</span>}
-                              </span>
-                            )}
+                  {(opportunities?.opportunities ?? []).map((opp) => {
+                    const strategyEligibility = opp.strategy_eligibility || {};
+                    const eligibleStrategies = Object.entries(strategyEligibility)
+                      .filter(([_, info]) => info?.eligible)
+                      .map(([id, _]) => id);
+                    const ineligibleStrategies = Object.entries(strategyEligibility)
+                      .filter(([_, info]) => !info?.eligible && info?.enabled)
+                      .map(([id, info]) => ({ id, reason: info?.reason }));
+                    return (
+                      <tr key={opp.symbol}>
+                        <td>{opp.rank}</td>
+                        <td>
+                          <Link to={`/scanner/symbol/${opp.symbol}`} className="link-mono">{opp.symbol}</Link>
+                        </td>
+                        <td>{opp.total_score != null ? Number(opp.total_score).toFixed(2) : '—'}</td>
+                        {(opportunities?.opportunities ?? []).some((o) => o.semantic_score != null) ? (
+                          <td>{opp.semantic_score != null ? Number(opp.semantic_score).toFixed(2) : '—'}</td>
+                        ) : null}
+                        {(opportunities?.opportunities ?? []).some((o) => o.candidate_source) ? (
+                          <td>{opp.candidate_source ?? '—'}</td>
+                        ) : null}
+                        <td>{opp.price != null ? `$${Number(opp.price).toFixed(2)}` : '—'}</td>
+                        <td>{opp.gap_pct != null ? `${Number(opp.gap_pct).toFixed(2)}%` : '—'}</td>
+                        <td>{opp.spread_bps != null ? opp.spread_bps : '—'}</td>
+                        <td>
+                          {opp.scrappy_present ? (
+                            <span style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', alignItems: 'flex-start' }}>
+                              <span>✓</span>
+                              {opp.scrappy_catalyst_direction && (
+                                <span className="badge badge--dim">{opp.scrappy_catalyst_direction}</span>
+                              )}
+                              {(opp.scrappy_stale_flag || opp.scrappy_conflict_flag) && (
+                                <span>
+                                  {opp.scrappy_stale_flag && <span className="flag-badge flag-badge--warn">stale</span>}
+                                  {opp.scrappy_conflict_flag && <span className="flag-badge flag-badge--warn">conflict</span>}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="cell--small">
+                          {Object.keys(strategyEligibility).length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.75rem' }}>
+                              {eligibleStrategies.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                  {eligibleStrategies.map((id) => {
+                                    const info = strategyEligibility[id];
+                                    const isSwing = info?.holding_period_type === 'swing';
+                                    return (
+                                      <span key={id} className={isSwing ? 'badge badge--swing' : 'badge badge--success'}>
+                                        ✓ {id} {isSwing ? '(swing)' : ''}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {ineligibleStrategies.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                                  {ineligibleStrategies.slice(0, 3).map(({ id, reason }) => (
+                                    <div key={id} className="muted-text" title={reason || ''}>
+                                      {id}: {reason || '—'}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td>
+                          <span className="reason-codes">
+                            {((opp.inclusion_reasons ?? opp.reason_codes) ?? []).slice(0, 3).join(', ')}
+                            {((opp.inclusion_reasons ?? opp.reason_codes) ?? []).length > 3 ? '…' : ''}
                           </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td>
-                        <span className="reason-codes">
-                          {((opp.inclusion_reasons ?? opp.reason_codes) ?? []).slice(0, 3).join(', ')}
-                          {((opp.inclusion_reasons ?? opp.reason_codes) ?? []).length > 3 ? '…' : ''}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

@@ -18,7 +18,19 @@ export interface ConfigResponse {
 }
 
 export interface StrategiesResponse {
-  strategies?: Array<{ strategy_id: string; strategy_version: string; mode?: string }>;
+  strategies?: Array<{
+    strategy_id: string;
+    strategy_version: string;
+    mode?: string;
+    entry_window_et?: string;
+    force_flat_et?: string | null;
+    enabled?: boolean;
+    paper_enabled?: boolean;
+    holding_period_type?: 'intraday' | 'swing';
+    max_hold_days?: number;
+    overnight_carry?: boolean;
+    note?: string;
+  }>;
 }
 
 export interface HealthDetailResponse {
@@ -62,6 +74,8 @@ export interface ShadowTradesResponse {
     net_pnl?: number;
     exit_reason?: string;
     scrappy_mode?: string;
+    strategy_id?: string;
+    strategy_version?: string;
   }>;
   count?: number;
 }
@@ -166,6 +180,18 @@ export interface PaperTestProofResponse {
   proof?: Record<string, { symbol?: string; side?: string; qty?: number; status?: string; order_id?: string }>;
 }
 
+export interface StrategyEligibility {
+  eligible?: boolean;
+  reason?: string | null;
+  entry_window?: string;
+  paper_enabled?: boolean;
+  enabled?: boolean;
+  holding_period_type?: 'intraday' | 'swing';
+  max_hold_days?: number;
+  overnight_carry?: boolean;
+  force_flat_et?: string | null;
+}
+
 export interface OpportunitiesNowResponse {
   opportunities?: Array<{
     symbol: string;
@@ -182,6 +208,7 @@ export interface OpportunitiesNowResponse {
     scrappy_conflict_flag?: boolean;
     inclusion_reasons?: string[];
     reason_codes?: string[];
+    strategy_eligibility?: Record<string, StrategyEligibility>;
     [key: string]: unknown;
   }>;
   updated_at?: string;
@@ -334,6 +361,13 @@ export interface PaperExposurePosition {
   exit_reason?: string;
   exit_ts?: string;
   last_error?: string;
+  holding_period_type?: 'intraday' | 'swing';
+  max_hold_days?: number;
+  entry_date?: string;
+  scheduled_exit_date?: string;
+  days_held?: number;
+  overnight_carry?: boolean;
+  overnight_carry_count?: number;
   [key: string]: unknown;
 }
 

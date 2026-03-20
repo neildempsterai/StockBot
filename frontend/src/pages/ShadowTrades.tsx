@@ -86,6 +86,8 @@ export function ShadowTrades() {
               <tr>
                 <th>Signal UUID</th>
                 <th>Mode</th>
+                <th>Strategy</th>
+                <th>Type</th>
                 <th>Entry time</th>
                 <th>Exit time</th>
                 <th>Entry $</th>
@@ -102,6 +104,21 @@ export function ShadowTrades() {
                 <tr key={t.signal_uuid}>
                   <td className="cell--mono cell--muted">{shortUuid(t.signal_uuid)}</td>
                   <td>{t.execution_mode}</td>
+                  <td className="cell--small">
+                    {t.strategy_id ? (
+                      <div>
+                        <div>{t.strategy_id}</div>
+                        {t.strategy_version && (
+                          <div className="muted-text" style={{ fontSize: '0.75rem' }}>v{t.strategy_version}</div>
+                        )}
+                      </div>
+                    ) : '—'}
+                  </td>
+                  <td>
+                    <span className={t.strategy_id?.includes('SWING') ? 'badge badge--swing' : 'badge badge--intraday'}>
+                      {t.strategy_id?.includes('SWING') ? 'Swing' : 'Intraday'}
+                    </span>
+                  </td>
                   <td className="cell--ts" title={t.entry_ts ?? ''}>{formatTs(t.entry_ts)}</td>
                   <td className="cell--ts" title={t.exit_ts ?? ''}>{formatTs(t.exit_ts)}</td>
                   <td>{formatPrice(t.entry_price)}</td>

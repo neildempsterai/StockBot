@@ -43,6 +43,7 @@ export const ENDPOINTS = {
   paperTestCancelAll: '/v1/paper/test/cancel-all',
   metricsSummary: '/v1/metrics/summary',
   metricsCompareScrappyModes: '/v1/metrics/compare-scrappy-modes',
+  metricsCompareStrategies: '/v1/metrics/compare-strategies',
   aiRefereeRecent: '/v1/ai-referee/recent',
   aiRefereeAssessment: (id: string) => `/v1/ai-referee/${id}`,
   metricsCompareAiReferee: '/v1/metrics/compare-ai-referee',

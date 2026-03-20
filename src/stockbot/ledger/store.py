@@ -120,18 +120,24 @@ class LedgerStore:
         await self._session.commit()
 
     async def get_signals(
-        self, limit: int = 100, scrappy_mode: str | None = None
+        self, limit: int = 100, scrappy_mode: str | None = None, strategy_id: str | None = None
     ) -> list[Signal]:
         q = select(Signal).order_by(Signal.created_at.desc()).limit(limit)
         if scrappy_mode is not None:
             q = q.where(Signal.scrappy_mode == scrappy_mode)
+        if strategy_id is not None:
+            q = q.where(Signal.strategy_id == strategy_id)
         result = await self._session.execute(q)
         return list(result.scalars().all())
 
     async def list_shadow_trades(
-        self, limit: int = 100, scrappy_mode: str | None = None
+        self, limit: int = 100, scrappy_mode: str | None = None, strategy_id: str | None = None
     ) -> list[ShadowTrade]:
-        q = select(ShadowTrade).order_by(ShadowTrade.created_at.desc()).limit(limit)
+        if strategy_id is not None:
+            # ShadowTrade doesn't have strategy_id directly, need to join with Signal
+            q = select(ShadowTrade).join(Signal, ShadowTrade.signal_uuid == Signal.signal_uuid).where(Signal.strategy_id == strategy_id).order_by(ShadowTrade.created_at.desc()).limit(limit)
+        else:
+            q = select(ShadowTrade).order_by(ShadowTrade.created_at.desc()).limit(limit)
         if scrappy_mode is not None:
             q = q.where(ShadowTrade.scrappy_mode == scrappy_mode)
         result = await self._session.execute(q)
@@ -206,6 +212,11 @@ class LedgerStore:
         paper_armed: bool,
         paper_armed_reason: str | None,
         lifecycle_status: str = "planned",
+        holding_period_type: str = "intraday",
+        max_hold_days: int = 0,
+        entry_date: str | None = None,
+        scheduled_exit_date: str | None = None,
+        overnight_carry: bool = False,
     ) -> PaperLifecycle:
         """Create lifecycle record at entry planning time."""
         row = PaperLifecycle(
@@ -242,10 +253,31 @@ class LedgerStore:
             paper_armed=paper_armed,
             paper_armed_reason=paper_armed_reason,
             lifecycle_status=lifecycle_status,
+            holding_period_type=holding_period_type,
+            max_hold_days=max_hold_days,
+            entry_date=entry_date,
+            scheduled_exit_date=scheduled_exit_date,
+            overnight_carry=overnight_carry,
         )
         self._session.add(row)
         await self._session.commit()
         return row
+
+    async def update_paper_lifecycle_overnight(
+        self, signal_uuid: UUID, days_held: int, overnight_carry_count: int
+    ) -> None:
+        """Update swing lifecycle with overnight carry state."""
+        from sqlalchemy import update
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(
+                days_held=days_held,
+                overnight_carry=True,
+                overnight_carry_count=overnight_carry_count,
+            )
+        )
+        await self._session.commit()
 
     async def update_paper_lifecycle_entry_order(
         self, signal_uuid: UUID, entry_order_id: str, lifecycle_status: str = "entry_submitted"

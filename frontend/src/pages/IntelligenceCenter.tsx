@@ -479,6 +479,7 @@ export function IntelligenceCenter() {
                   <th>Gap %</th>
                   <th>Scrappy</th>
                   <th>AI Referee</th>
+                  <th>Strategy Eligibility</th>
                   <th>Position</th>
                   <th>Status</th>
                 </tr>
@@ -500,6 +501,13 @@ export function IntelligenceCenter() {
                   const hasLowEvidence = coverageStatus === 'low_evidence';
                   const hasNoResearch = coverageStatus === 'no_research';
                   const hasAiAssessment = aiAssessment != null;
+                  const strategyEligibility = opp.strategy_eligibility || {};
+                  const eligibleStrategies = Object.entries(strategyEligibility)
+                    .filter(([_, info]) => info?.eligible)
+                    .map(([id, _]) => id);
+                  const ineligibleStrategies = Object.entries(strategyEligibility)
+                    .filter(([_, info]) => !info?.eligible && info?.enabled)
+                    .map(([id, info]) => ({ id, reason: info?.reason }));
 
                   // Determine pipeline stage with explicit reasoning using coverage status
                   let pipelineStage = 'discovered';
@@ -589,10 +597,47 @@ export function IntelligenceCenter() {
                           <span className="muted-text">No assessment</span>
                         )}
                       </td>
+                      <td className="cell--small">
+                        {Object.keys(strategyEligibility).length > 0 ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.75rem' }}>
+                            {eligibleStrategies.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                                {eligibleStrategies.map((id) => {
+                                  const info = strategyEligibility[id];
+                                  const isSwing = info?.holding_period_type === 'swing';
+                                  return (
+                                    <div key={id}>
+                                      <span className={isSwing ? 'badge badge--swing' : 'badge badge--success'}>
+                                        ✓ {id} {isSwing ? '(swing)' : ''}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            {ineligibleStrategies.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                                {ineligibleStrategies.slice(0, 3).map(({ id, reason }) => (
+                                  <div key={id} className="muted-text" title={reason || ''}>
+                                    {id}: {reason || '—'}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
                       <td>
                         {hasOpenPosition && position ? (
                           <div style={{ fontSize: '0.85rem' }}>
                             <StateBadge label={`${position.side?.toUpperCase()} ${position.qty}`} variant="success" />
+                            {position.holding_period_type === 'swing' && (
+                              <div style={{ marginTop: '0.15rem' }}>
+                                <span className="badge badge--swing">Swing {position.days_held ?? 0}d/{position.max_hold_days ?? 5}d</span>
+                              </div>
+                            )}
                             {position.unrealized_pl != null && (
                               <div className="muted-text" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
                                 <span className={position.unrealized_pl >= 0 ? 'pnl--positive' : 'pnl--negative'}>
