@@ -405,7 +405,7 @@ export function CommandCenter() {
                 {scannerRuns.runs.slice(0, 10).map((r) => (
                   <tr key={r.run_id}>
                     <td>{r.run_ts ? formatDateTime(r.run_ts) : '—'}</td>
-                    <td><StateBadge label={r.status} variant={r.status === 'completed' ? 'success' : 'default'} /></td>
+                    <td><StateBadge label={r.status ?? '—'} variant={r.status === 'completed' ? 'success' : 'default'} /></td>
                     <td>{r.universe_size}</td>
                     <td>{r.candidates_scored}</td>
                     <td>{r.top_candidates_count}</td>

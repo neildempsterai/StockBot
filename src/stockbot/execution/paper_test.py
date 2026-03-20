@@ -30,6 +30,42 @@ INTENT_FLATTEN = "flatten"
 
 CLIENT_ORDER_ID_PREFIX = "paper_test_"
 
+# Canonical order_source for API exposure: strategy_paper | operator_test | legacy_unknown
+ORDER_SOURCE_STRATEGY_PAPER = "strategy_paper"
+ORDER_SOURCE_OPERATOR_TEST = "operator_test"
+ORDER_SOURCE_LEGACY_UNKNOWN = "legacy_unknown"
+
+
+def _operator_paper_test_guard(intent: str) -> tuple[str | None, dict | None]:
+    """Return (reason, response_dict) if operator paper test is blocked; (None, None) if allowed."""
+    from stockbot.config import get_settings
+    s = get_settings()
+    if not getattr(s, "paper_execution_enabled", False):
+        return ("paper_disabled", {
+            "accepted": False,
+            "reason": "paper_disabled",
+            "message": "Paper execution is disabled",
+            "mode": "paper_test",
+            "intent": intent,
+        })
+    if not getattr(s, "paper_trading_armed", False):
+        return ("paper_disarmed", {
+            "accepted": False,
+            "reason": "paper_disarmed",
+            "message": "Paper trading is disarmed. Set PAPER_TRADING_ARMED=1 to allow paper orders.",
+            "mode": "paper_test",
+            "intent": intent,
+        })
+    if not getattr(s, "operator_paper_test_enabled", False):
+        return ("operator_paper_test_disabled", {
+            "accepted": False,
+            "reason": "operator_paper_test_disabled",
+            "message": "Operator paper test routes are disabled. Set OPERATOR_PAPER_TEST_ENABLED=1 to allow.",
+            "mode": "paper_test",
+            "intent": intent,
+        })
+    return (None, None)
+
 
 def _decimal(v: float | Decimal | None) -> Decimal:
     if v is None:
@@ -102,6 +138,16 @@ async def _persist_paper_order(
         await session.commit()
 
 
+def _apply_operator_caps(qty: Decimal, symbol: str, side: str, max_qty: int, max_notional: float) -> tuple[Decimal, str | None]:
+    """Apply operator paper test caps; return (capped_qty, rejection_reason or None)."""
+    if qty <= 0:
+        return (qty, "qty_must_be_positive")
+    capped = min(int(qty), max_qty)
+    if capped <= 0:
+        return (Decimal("0"), "operator_paper_test_max_qty_exceeded")
+    return (Decimal(str(capped)), None)
+
+
 async def run_buy_open(
     symbol: str,
     qty: float | Decimal,
@@ -112,6 +158,33 @@ async def run_buy_open(
 ) -> dict:
     """Execute buy-open (BUY to open long). Returns response shape for API."""
     import asyncio
+    reason, block_response = _operator_paper_test_guard(INTENT_BUY_OPEN)
+    if block_response is not None:
+        block_response["order_id"] = None
+        block_response["client_order_id"] = None
+        block_response["side"] = "buy"
+        block_response["symbol"] = symbol
+        block_response["qty"] = float(_decimal(qty))
+        return block_response
+    from stockbot.config import get_settings
+    s = get_settings()
+    max_qty = getattr(s, "operator_paper_test_max_qty", 1)
+    max_notional = getattr(s, "operator_paper_test_max_notional", 500.0)
+    qty_d = _decimal(qty)
+    qty_d, cap_reason = _apply_operator_caps(qty_d, symbol, "buy", max_qty, max_notional)
+    if cap_reason:
+        return {
+            "accepted": False,
+            "reason": cap_reason,
+            "message": f"Operator paper test cap: max_qty={max_qty}",
+            "order_id": None,
+            "client_order_id": None,
+            "side": "buy",
+            "symbol": symbol,
+            "qty": float(qty_d),
+            "mode": "paper_test",
+            "intent": INTENT_BUY_OPEN,
+        }
     client = AlpacaClient()
     account = await asyncio.to_thread(client.get_account)
     asset = await asyncio.to_thread(client.get_asset, symbol)
@@ -204,6 +277,32 @@ async def run_sell_close(
 ) -> dict:
     """Execute sell-close (SELL to close long)."""
     import asyncio
+    reason, block_response = _operator_paper_test_guard(INTENT_SELL_CLOSE)
+    if block_response is not None:
+        block_response["order_id"] = None
+        block_response["client_order_id"] = None
+        block_response["side"] = "sell"
+        block_response["symbol"] = symbol
+        block_response["qty"] = float(_decimal(qty))
+        return block_response
+    from stockbot.config import get_settings
+    s = get_settings()
+    max_qty = getattr(s, "operator_paper_test_max_qty", 1)
+    qty_d = _decimal(qty)
+    qty_d, cap_reason = _apply_operator_caps(qty_d, symbol, "sell", max_qty, 500.0)
+    if cap_reason:
+        return {
+            "accepted": False,
+            "reason": cap_reason,
+            "message": f"Operator paper test cap: max_qty={max_qty}",
+            "order_id": None,
+            "client_order_id": None,
+            "side": "sell",
+            "symbol": symbol,
+            "qty": float(qty_d),
+            "mode": "paper_test",
+            "intent": INTENT_SELL_CLOSE,
+        }
     client = AlpacaClient()
     account = await asyncio.to_thread(client.get_account)
     position = await asyncio.to_thread(client.get_position, symbol)
@@ -296,10 +395,35 @@ async def run_short_open(
 ) -> dict:
     """Execute short-open (SELL to open short)."""
     import asyncio
+    reason, block_response = _operator_paper_test_guard(INTENT_SHORT_OPEN)
+    if block_response is not None:
+        block_response["order_id"] = None
+        block_response["client_order_id"] = None
+        block_response["side"] = "sell"
+        block_response["symbol"] = symbol
+        block_response["qty"] = float(_decimal(qty))
+        return block_response
+    from stockbot.config import get_settings
+    s = get_settings()
+    max_qty = getattr(s, "operator_paper_test_max_qty", 1)
+    qty_d = _decimal(qty)
+    qty_d, cap_reason = _apply_operator_caps(qty_d, symbol, "sell", max_qty, 500.0)
+    if cap_reason:
+        return {
+            "accepted": False,
+            "reason": cap_reason,
+            "message": f"Operator paper test cap: max_qty={max_qty}",
+            "order_id": None,
+            "client_order_id": None,
+            "side": "sell",
+            "symbol": symbol,
+            "qty": float(qty_d),
+            "mode": "paper_test",
+            "intent": INTENT_SHORT_OPEN,
+        }
     client = AlpacaClient()
     account = await asyncio.to_thread(client.get_account)
     asset = await asyncio.to_thread(client.get_asset, symbol)
-    qty_d = _decimal(qty)
     val = validate_short_open(
         account=account,
         asset=asset,
@@ -388,10 +512,35 @@ async def run_buy_cover(
 ) -> dict:
     """Execute buy-cover (BUY to cover short)."""
     import asyncio
+    reason, block_response = _operator_paper_test_guard(INTENT_BUY_COVER)
+    if block_response is not None:
+        block_response["order_id"] = None
+        block_response["client_order_id"] = None
+        block_response["side"] = "buy"
+        block_response["symbol"] = symbol
+        block_response["qty"] = float(_decimal(qty))
+        return block_response
+    from stockbot.config import get_settings
+    s = get_settings()
+    max_qty = getattr(s, "operator_paper_test_max_qty", 1)
+    qty_d = _decimal(qty)
+    qty_d, cap_reason = _apply_operator_caps(qty_d, symbol, "buy", max_qty, 500.0)
+    if cap_reason:
+        return {
+            "accepted": False,
+            "reason": cap_reason,
+            "message": f"Operator paper test cap: max_qty={max_qty}",
+            "order_id": None,
+            "client_order_id": None,
+            "side": "buy",
+            "symbol": symbol,
+            "qty": float(qty_d),
+            "mode": "paper_test",
+            "intent": INTENT_BUY_COVER,
+        }
     client = AlpacaClient()
     account = await asyncio.to_thread(client.get_account)
     position = await asyncio.to_thread(client.get_position, symbol)
-    qty_d = _decimal(qty)
     val = validate_buy_cover(
         account=account,
         position=position,
@@ -474,16 +623,11 @@ async def run_flatten_all(note: str | None = None) -> dict:
     """Submit market close orders for all positions. Returns summary."""
     import asyncio
     from stockbot.config import get_settings
+    reason, block_response = _operator_paper_test_guard(INTENT_FLATTEN)
+    if block_response is not None:
+        block_response["orders_submitted"] = 0
+        return block_response
     settings = get_settings()
-    if not getattr(settings, "paper_execution_enabled", False):
-        return {
-            "accepted": False,
-            "reason": "paper_disabled",
-            "message": "Paper execution is disabled",
-            "orders_submitted": 0,
-            "mode": "paper_test",
-            "intent": INTENT_FLATTEN,
-        }
     client = AlpacaClient()
     account = await asyncio.to_thread(client.get_account)
     if account.get("trading_blocked") or account.get("account_blocked"):

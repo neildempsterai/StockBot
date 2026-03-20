@@ -2,10 +2,14 @@
  * Typed API client for StockBot backend.
  * Base URL: /api when using Vite proxy to backend, or env VITE_API_BASE.
  */
-const API_BASE =
-  typeof import.meta.env !== 'undefined' && import.meta.env?.VITE_API_BASE
-    ? String(import.meta.env.VITE_API_BASE)
-    : '/api';
+const getEnv = (): { VITE_API_BASE?: string } => {
+  try {
+    return (import.meta as unknown as { env?: { VITE_API_BASE?: string } }).env ?? {};
+  } catch {
+    return {};
+  }
+};
+const API_BASE = getEnv().VITE_API_BASE ? String(getEnv().VITE_API_BASE) : '/api';
 
 export type ApiError = { status: number; detail?: string; message?: string };
 
@@ -52,6 +56,18 @@ export async function apiPost<T>(path: string, params?: Record<string, string | 
   const res = await fetch(url.toString(), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+  });
+  return handleResponse<T>(res);
+}
+
+/** POST with JSON body (e.g. paper test buy-open). */
+export async function apiPostWithBody<T>(path: string, body: unknown): Promise<T> {
+  const pathOnly = path.split('?')[0];
+  const url = new URL(path.startsWith('http') ? path : `${API_BASE}${pathOnly}`, window.location.origin);
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   return handleResponse<T>(res);
 }

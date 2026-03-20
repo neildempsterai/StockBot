@@ -94,6 +94,10 @@ services:
       STOCKBOT_UNIVERSE: ${STOCKBOT_UNIVERSE:-AAPL,AMD,AMZN,META,MSFT,NVDA,QQQ,SPY,TSLA}
       EXECUTION_MODE: ${EXECUTION_MODE:-shadow}
       PAPER_EXECUTION_ENABLED: ${PAPER_EXECUTION_ENABLED:-false}
+      # AI referee (off by default; set in .env to enable). See docs/INTELLIGENCE_AND_AI_REFEREE.md
+      AI_REFEREE_ENABLED: ${AI_REFEREE_ENABLED:-false}
+      AI_REFEREE_MODE: ${AI_REFEREE_MODE:-off}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

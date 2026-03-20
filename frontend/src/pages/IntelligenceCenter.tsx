@@ -118,9 +118,9 @@ export function IntelligenceCenter() {
         <KPICard title="Last auto run" value={lastRunAt ? formatTs(lastRunAt) : '—'} />
         <KPICard title="Symbols covered" value={symbolsCount} />
         <KPICard title="Snapshots total" value={total} />
-        <KPICard title="Fresh" value={freshCount} />
-        <KPICard title="Stale" value={staleCount} />
-        <KPICard title="Conflict" value={conflictCount} />
+        <KPICard title="Fresh" value={String(freshCount)} />
+        <KPICard title="Stale" value={String(staleCount)} />
+        <KPICard title="Conflict" value={String(conflictCount)} />
         {watchlistSize > 0 && <KPICard title="Watchlist size" value={watchlistSize} />}
       </div>
       {autoRuns?.runs?.length ? (

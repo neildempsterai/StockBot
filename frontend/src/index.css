@@ -172,7 +172,8 @@ body {
   justify-content: center;
 }
 
-.loading-skeleton .skeleton-line {
+.loading-skeleton .skeleton-line,
+.loading-skeleton .loading-skeleton__line {
   height: 1rem;
   background: var(--border);
   border-radius: 4px;

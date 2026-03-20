@@ -129,6 +129,7 @@ WORKER_UNIVERSE_REFRESH_TS_KEY = "stockbot:worker:universe_refresh_ts"
 WORKER_UNIVERSE_SOURCE_KEY = "stockbot:worker:universe_source"
 WORKER_UNIVERSE_COUNT_KEY = "stockbot:worker:universe_count"
 WORKER_FALLBACK_REASON_KEY = "stockbot:worker:universe_fallback_reason"
+PAPER_ARMED_REDIS_KEY = "stockbot:paper:armed"
 
 
 @app.get("/health/detail")
@@ -240,6 +241,10 @@ def get_config() -> dict:
         "STOCKBOT_UNIVERSE": s.stockbot_universe,
         "EXECUTION_MODE": getattr(s, "execution_mode", "shadow"),
         "PAPER_EXECUTION_ENABLED": getattr(s, "paper_execution_enabled", False),
+        "PAPER_TRADING_ARMED": getattr(s, "paper_trading_armed", False),
+        "OPERATOR_PAPER_TEST_ENABLED": getattr(s, "operator_paper_test_enabled", False),
+        "OPERATOR_PAPER_TEST_MAX_QTY": getattr(s, "operator_paper_test_max_qty", 1),
+        "OPERATOR_PAPER_TEST_MAX_NOTIONAL": getattr(s, "operator_paper_test_max_notional", 500.0),
         "PAPER_EXECUTION_E2E_SUPPORTED": paper_e2e_supported,
         "PAPER_EXECUTION_E2E_NOTE": (
             "Supported when Alpaca credentials are configured and trade gateway/reconciler are running."
@@ -281,6 +286,20 @@ async def runtime_status() -> dict:
                 else "Not yet supported end-to-end in this runtime because Alpaca credentials are missing."
             ),
         },
+        "operator_paper_test": {
+            "enabled": getattr(s, "operator_paper_test_enabled", False),
+            "max_qty": getattr(s, "operator_paper_test_max_qty", 1),
+            "max_notional": getattr(s, "operator_paper_test_max_notional", 500.0),
+        },
+        "scrappy": {
+            "mode": getattr(s, "scrappy_mode", "advisory"),
+            "paper_required": getattr(s, "scrappy_required_for_paper", False),
+        },
+        "ai_referee": {
+            "enabled": getattr(s, "ai_referee_enabled", False),
+            "mode": getattr(s, "ai_referee_mode", "advisory"),
+            "paper_required": getattr(s, "ai_referee_required_for_paper", False),
+        },
     }
     try:
         r = redis.from_url(s.redis_url, decode_responses=True)
@@ -320,6 +339,23 @@ async def runtime_status() -> dict:
             "dynamic_universe_stale_after_sec": s.scanner_top_stale_sec,
             "error": str(e)[:120],
         }
+    # Paper armed: config permits arming; actual armed state is in Redis (so we can disarm via API without restart)
+    try:
+        r2 = redis.from_url(s.redis_url, decode_responses=True)
+        paper_armed_redis = await r2.get(PAPER_ARMED_REDIS_KEY)
+        await r2.aclose()
+        config_armed = getattr(s, "paper_trading_armed", False)
+        effective_armed = config_armed and paper_armed_redis == "1"
+        out["paper_trading_armed"] = effective_armed
+        if effective_armed:
+            out["paper_armed_reason"] = "armed"
+        elif not config_armed:
+            out["paper_armed_reason"] = "disarmed_by_default"
+        else:
+            out["paper_armed_reason"] = "disarmed_via_api"
+    except Exception:
+        out["paper_trading_armed"] = False
+        out["paper_armed_reason"] = "disarmed_unable_to_read_redis"
     return out
 
 
@@ -750,9 +786,15 @@ async def list_paper_orders(
             origin, intent = origin_map[oid]
             o["order_origin"] = origin
             o["order_intent"] = intent
+            o["order_source"] = (
+                "strategy_paper" if origin == "strategy" else
+                "operator_test" if origin == "operator_test" else
+                "legacy_unknown"
+            )
         else:
             o["order_origin"] = None
             o["order_intent"] = None
+            o["order_source"] = "legacy_unknown"
     return {"orders": orders, "count": len(orders)}
 
 
@@ -769,6 +811,255 @@ def get_paper_order(order_id: str) -> dict:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Alpaca order: {str(e)[:200]}")
+
+
+def _order_origin_to_source(origin: str | None) -> str:
+    """Canonical order_source: strategy_paper | operator_test | legacy_unknown."""
+    if origin == "strategy":
+        return "strategy_paper"
+    if origin == "operator_test":
+        return "operator_test"
+    return "legacy_unknown"
+
+
+@app.get("/v1/paper/exposure")
+async def paper_exposure() -> dict:
+    """Current paper exposure: for each position, symbol, source, provenance, exit plan status, orphaned.
+    Truthful; no fake values. Use to diagnose what caused a position and whether it is managed."""
+    import asyncio
+    client = _alpaca_client_or_503()
+    try:
+        positions = await asyncio.to_thread(client.list_positions)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Alpaca positions: {str(e)[:200]}")
+    exposure: list[dict] = []
+    factory = get_session_factory()
+    async with factory() as session:
+        for p in positions or []:
+            symbol = p.get("symbol") or ""
+            qty_val = p.get("qty") or 0
+            try:
+                qty_float = float(qty_val)
+            except (TypeError, ValueError):
+                qty_float = 0.0
+            side = "long" if qty_float >= 0 else "short"
+            entry_ts = p.get("opened_at") or p.get("created_at")
+            # Find best-matching PaperOrder for this symbol/side (filled orders that opened position)
+            result = await session.execute(
+                select(PaperOrder)
+                .where(PaperOrder.symbol == symbol)
+                .where(PaperOrder.side == ("buy" if qty_float >= 0 else "sell"))
+                .order_by(PaperOrder.submitted_at.desc().nullslast())
+                .limit(5)
+            )
+            rows = result.scalars().all()
+            order_source = "legacy_unknown"
+            order_origin = None
+            order_intent = None
+            signal_uuid = None
+            strategy_id = None
+            strategy_version = None
+            scrappy_at_entry = None
+            ai_referee_at_entry = None
+            sizing_at_entry = None
+            scrappy_detail = None
+            ai_referee_detail = None
+            if rows:
+                row = rows[0]
+                order_origin = row.order_origin
+                order_intent = row.order_intent
+                order_source = _order_origin_to_source(row.order_origin)
+                signal_uuid = str(row.signal_uuid) if row.signal_uuid else None
+                if row.signal_uuid:
+                    sig_result = await session.execute(
+                        select(Signal).where(Signal.signal_uuid == row.signal_uuid).limit(1)
+                    )
+                    sig = sig_result.scalar().first()
+                    if sig:
+                        strategy_id = getattr(sig, "strategy_id", None)
+                        strategy_version = getattr(sig, "strategy_version", None)
+                        scrappy_at_entry = getattr(sig, "scrappy_mode", None)
+                        ai_referee_at_entry = "ran" if getattr(sig, "ai_referee_assessment_id", None) else "not_run"
+                        if getattr(sig, "intelligence_snapshot_id", None):
+                            snap = await session.get(SymbolIntelligenceSnapshot, sig.intelligence_snapshot_id)
+                            if snap:
+                                headline_count = len(snap.headline_set_json) if isinstance(getattr(snap, "headline_set_json", None), list) else 0
+                                scrappy_detail = {
+                                    "snapshot_id": snap.id,
+                                    "freshness_minutes": getattr(snap, "freshness_minutes", None),
+                                    "catalyst_direction": getattr(snap, "catalyst_direction", None),
+                                    "evidence_count": getattr(snap, "evidence_count", None),
+                                    "headline_count": headline_count,
+                                    "stale_flag": getattr(snap, "stale_flag", None),
+                                    "conflict_flag": getattr(snap, "conflict_flag", None),
+                                }
+                        if getattr(sig, "ai_referee_assessment_id", None):
+                            ref = await session.get(AiRefereeAssessment, sig.ai_referee_assessment_id)
+                            if ref:
+                                ai_referee_detail = {
+                                    "ran": True,
+                                    "model_name": getattr(ref, "model_name", None),
+                                    "referee_version": getattr(ref, "referee_version", None),
+                                    "decision_class": getattr(ref, "decision_class", None),
+                                    "setup_quality_score": getattr(ref, "setup_quality_score", None),
+                                    "contradiction_flag": getattr(ref, "contradiction_flag", None),
+                                    "stale_flag": getattr(ref, "stale_flag", None),
+                                    "evidence_sufficiency": getattr(ref, "evidence_sufficiency", None),
+                                    "plain_english_rationale": (getattr(ref, "plain_english_rationale", None) or "")[:500],
+                                }
+            exposure.append({
+                "symbol": symbol,
+                "side": side,
+                "qty": qty_float,
+                "entry_ts": entry_ts,
+                "source": order_source,
+                "order_origin": order_origin,
+                "operator_intent": order_intent if order_source == "operator_test" else None,
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "signal_uuid": signal_uuid,
+                "scrappy_at_entry": scrappy_at_entry,
+                "scrappy_detail": scrappy_detail,
+                "ai_referee_at_entry": ai_referee_at_entry,
+                "ai_referee_detail": ai_referee_detail,
+                "sizing_at_entry": sizing_at_entry,
+                "exit_plan_status": "not_persisted",
+                "broker_protection": "unknown",
+                "orphaned": order_source == "legacy_unknown",
+                "static_fallback_at_entry": "unknown",
+            })
+    return {"positions": exposure, "count": len(exposure)}
+
+
+async def _paper_effective_armed() -> tuple[bool, str]:
+    """Effective paper armed = config permits AND Redis says armed. Returns (armed, reason)."""
+    s = get_settings()
+    if not getattr(s, "paper_trading_armed", False):
+        return (False, "disarmed_by_default")
+    try:
+        r = redis.from_url(s.redis_url, decode_responses=True)
+        val = await r.get(PAPER_ARMED_REDIS_KEY)
+        await r.aclose()
+        if val == "1":
+            return (True, "armed")
+        return (False, "disarmed_via_api")
+    except Exception as e:
+        return (False, f"disarmed_redis_error:{str(e)[:50]}")
+
+
+@app.get("/v1/paper/arming-prerequisites")
+async def paper_arming_prerequisites() -> dict:
+    """Checks that must pass before paper can be armed. Used to refuse arm unless all satisfied."""
+    s = get_settings()
+    checks: dict[str, dict] = {}
+    blockers: list[str] = []
+
+    # Paper execution enabled
+    pe = getattr(s, "paper_execution_enabled", False)
+    checks["paper_execution_enabled"] = {"ok": pe, "detail": "enabled" if pe else "disabled"}
+    if not pe:
+        blockers.append("paper_execution_disabled")
+
+    # Credentials configured
+    creds = bool(s.alpaca_api_key_id and s.alpaca_api_secret_key)
+    checks["credentials_configured"] = {"ok": creds, "detail": "configured" if creds else "missing"}
+    if not creds:
+        blockers.append("credentials_missing")
+
+    # Broker reachable
+    broker_ok = False
+    try:
+        client = AlpacaClient()
+        _ = client.get_account()
+        broker_ok = True
+    except Exception as e:
+        checks["broker_reachable"] = {"ok": False, "detail": str(e)[:80]}
+        blockers.append("broker_unreachable")
+    if broker_ok:
+        checks["broker_reachable"] = {"ok": True, "detail": "ok"}
+
+    # DB reachable
+    db_ok = False
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as e:
+        checks["database_reachable"] = {"ok": False, "detail": str(e)[:80]}
+        blockers.append("database_unreachable")
+    if db_ok:
+        checks["database_reachable"] = {"ok": True, "detail": "ok"}
+
+    # Redis reachable
+    redis_ok = False
+    try:
+        r = redis.from_url(s.redis_url, decode_responses=True)
+        await r.ping()
+        gateway_source = await r.get(GATEWAY_SYMBOL_SOURCE_KEY)
+        worker_source = await r.get(WORKER_UNIVERSE_SOURCE_KEY)
+        worker_ts = await r.get(WORKER_HEARTBEAT_KEY)
+        gateway_ts = await r.get(GATEWAY_MARKET_HEARTBEAT_KEY)
+        await r.aclose()
+        redis_ok = True
+        checks["redis_reachable"] = {"ok": True, "detail": "ok"}
+        checks["worker_heartbeat"] = {"ok": bool(worker_ts), "detail": "present" if worker_ts else "absent"}
+        if not worker_ts:
+            blockers.append("worker_heartbeat_absent")
+        checks["gateway_heartbeat"] = {"ok": bool(gateway_ts), "detail": "present" if gateway_ts else "absent"}
+        if not gateway_ts:
+            blockers.append("gateway_heartbeat_absent")
+        checks["dynamic_universe_gateway"] = {"ok": gateway_source == "dynamic", "detail": gateway_source or "unknown"}
+        if gateway_source == "static":
+            blockers.append("gateway_on_static_fallback")
+        checks["dynamic_universe_worker"] = {"ok": worker_source in ("dynamic", "hybrid"), "detail": worker_source or "unknown"}
+        if worker_source == "static":
+            blockers.append("worker_on_static_fallback")
+    except Exception as e:
+        checks["redis_reachable"] = {"ok": False, "detail": str(e)[:80]}
+        blockers.append("redis_unreachable")
+
+    # Exit protection: we can submit close orders via Alpaca (minimal check)
+    checks["exit_protection_available"] = {"ok": broker_ok, "detail": "broker_can_submit_orders" if broker_ok else "broker_unreachable"}
+    if not broker_ok and "exit_protection_available" not in [b.split("_")[0] for b in blockers]:
+        pass  # already have broker_unreachable
+
+    satisfied = len(blockers) == 0
+    return {"satisfied": satisfied, "blockers": blockers, "checks": checks}
+
+
+@app.post("/v1/paper/arm")
+async def paper_arm() -> dict:
+    """Arm paper trading only if config permits and all arming prerequisites are satisfied."""
+    s = get_settings()
+    if not getattr(s, "paper_trading_armed", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Config PAPER_TRADING_ARMED is false; enable it to allow arming via API.",
+        )
+    pre = await paper_arming_prerequisites()
+    if not pre["satisfied"]:
+        raise HTTPException(status_code=400, detail={"reason": "prerequisites_not_satisfied", "blockers": pre["blockers"]})
+    try:
+        r = redis.from_url(s.redis_url, decode_responses=True)
+        await r.set(PAPER_ARMED_REDIS_KEY, "1")
+        await r.aclose()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis set failed: {str(e)[:100]}")
+    return {"armed": True, "message": "Paper trading armed. Call POST /v1/paper/disarm to disarm immediately."}
+
+
+@app.post("/v1/paper/disarm")
+async def paper_disarm() -> dict:
+    """Disarm paper trading immediately. No prerequisites required."""
+    s = get_settings()
+    try:
+        r = redis.from_url(s.redis_url, decode_responses=True)
+        await r.set(PAPER_ARMED_REDIS_KEY, "0")
+        await r.aclose()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis set failed: {str(e)[:100]}")
+    return {"armed": False, "message": "Paper trading disarmed. No paper orders will be submitted until re-armed."}
 
 
 @app.get("/v1/clock")
@@ -993,6 +1284,9 @@ async def paper_test_buy_open(
     note: str | None = Body(None, embed=True),
 ) -> dict:
     """Operator test: BUY to open long. Not strategy authority."""
+    armed, reason = await _paper_effective_armed()
+    if not armed:
+        raise HTTPException(status_code=403, detail={"reason": reason, "message": "Paper trading is not armed. Call POST /v1/paper/arm after prerequisites pass."})
     out = await run_buy_open(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
     out["_operator_only"] = True
     return out
@@ -1008,6 +1302,9 @@ async def paper_test_sell_close(
     note: str | None = Body(None, embed=True),
 ) -> dict:
     """Operator test: SELL to close long. Not strategy authority."""
+    armed, reason = await _paper_effective_armed()
+    if not armed:
+        raise HTTPException(status_code=403, detail={"reason": reason, "message": "Paper trading is not armed. Call POST /v1/paper/arm after prerequisites pass."})
     out = await run_sell_close(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
     out["_operator_only"] = True
     return out
@@ -1023,6 +1320,9 @@ async def paper_test_short_open(
     note: str | None = Body(None, embed=True),
 ) -> dict:
     """Operator test: SELL to open short. Not strategy authority."""
+    armed, reason = await _paper_effective_armed()
+    if not armed:
+        raise HTTPException(status_code=403, detail={"reason": reason, "message": "Paper trading is not armed. Call POST /v1/paper/arm after prerequisites pass."})
     out = await run_short_open(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
     out["_operator_only"] = True
     return out
@@ -1038,6 +1338,9 @@ async def paper_test_buy_cover(
     note: str | None = Body(None, embed=True),
 ) -> dict:
     """Operator test: BUY to cover short. Not strategy authority."""
+    armed, reason = await _paper_effective_armed()
+    if not armed:
+        raise HTTPException(status_code=403, detail={"reason": reason, "message": "Paper trading is not armed. Call POST /v1/paper/arm after prerequisites pass."})
     out = await run_buy_cover(symbol=symbol, qty=qty, order_type=order_type, limit_price=limit_price, extended_hours=extended_hours, note=note)
     out["_operator_only"] = True
     return out
@@ -1046,6 +1349,9 @@ async def paper_test_buy_cover(
 @app.post("/v1/paper/test/flatten-all")
 async def paper_test_flatten_all(note: str | None = Body(None, embed=True)) -> dict:
     """Operator test: market close all positions. Not strategy authority."""
+    armed, reason = await _paper_effective_armed()
+    if not armed:
+        raise HTTPException(status_code=403, detail={"reason": reason, "message": "Paper trading is not armed. Call POST /v1/paper/arm after prerequisites pass."})
     out = await run_flatten_all(note=note)
     out["_operator_only"] = True
     return out

@@ -52,8 +52,15 @@ class Settings(BaseSettings):
     # Execution: shadow (no broker orders) | paper (place paper orders when enabled)
     execution_mode: Literal["shadow", "paper"] = Field(default="shadow", alias="EXECUTION_MODE")
     paper_execution_enabled: bool = Field(default=False, alias="PAPER_EXECUTION_ENABLED")
+    # Global paper kill switch. When False: no worker paper orders, no operator paper test orders. Default safe.
+    paper_trading_armed: bool = Field(default=False, alias="PAPER_TRADING_ARMED")
     order_type_default: Literal["market", "limit"] = Field(default="market", alias="ORDER_TYPE_DEFAULT")
     paper_allow_shorts: bool = Field(default=False, alias="PAPER_ALLOW_SHORTS")
+
+    # Operator paper test routes: blocked by default; require explicit enable and respect caps
+    operator_paper_test_enabled: bool = Field(default=False, alias="OPERATOR_PAPER_TEST_ENABLED")
+    operator_paper_test_max_qty: int = Field(default=1, alias="OPERATOR_PAPER_TEST_MAX_QTY")
+    operator_paper_test_max_notional: float = Field(default=500.0, alias="OPERATOR_PAPER_TEST_MAX_NOTIONAL")
 
     # Risk / sizing (paper mode)
     risk_per_trade_pct_equity: float = Field(default=0.5, alias="RISK_PER_TRADE_PCT_EQUITY")

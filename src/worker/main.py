@@ -23,6 +23,8 @@ from stockbot.config import get_settings
 from stockbot.risk.sizing import compute_sizing
 from stockbot.db.session import get_session_factory
 from stockbot.gateways.market_gateway import (
+    REDIS_KEY_GATEWAY_FALLBACK_REASON,
+    REDIS_KEY_GATEWAY_SYMBOL_SOURCE,
     REDIS_STREAM_BARS,
     REDIS_STREAM_NEWS,
     REDIS_STREAM_QUOTES,
@@ -131,7 +133,25 @@ REDIS_KEY_WORKER_UNIVERSE_REFRESH_TS = "stockbot:worker:universe_refresh_ts"
 REDIS_KEY_WORKER_UNIVERSE_SOURCE = "stockbot:worker:universe_source"
 REDIS_KEY_WORKER_UNIVERSE_COUNT = "stockbot:worker:universe_count"
 REDIS_KEY_WORKER_FALLBACK_REASON = "stockbot:worker:universe_fallback_reason"
+PAPER_ARMED_REDIS_KEY = "stockbot:paper:armed"
 UNIVERSE_REFRESH_INTERVAL_SEC = 60
+
+
+async def _paper_allowed_universe(redis_client: redis.Redis) -> tuple[bool, str | None]:
+    """In paper mode, block submission if gateway or worker is on static fallback.
+    Returns (True, None) if allowed, (False, reason) if blocked."""
+    try:
+        worker_source = await redis_client.get(REDIS_KEY_WORKER_UNIVERSE_SOURCE)
+        worker_reason = await redis_client.get(REDIS_KEY_WORKER_FALLBACK_REASON)
+        gateway_source = await redis_client.get(REDIS_KEY_GATEWAY_SYMBOL_SOURCE)
+        gateway_reason = await redis_client.get(REDIS_KEY_GATEWAY_FALLBACK_REASON)
+    except Exception as e:
+        return (False, f"paper_blocked_universe_check_failed:{e!s}"[:80])
+    if worker_source == "static":
+        return (False, f"paper_blocked_worker_static_fallback:{worker_reason or 'unknown'}"[:80])
+    if gateway_source == "static":
+        return (False, f"paper_blocked_gateway_static_fallback:{gateway_reason or 'unknown'}"[:80])
+    return (True, None)
 WORKER_UNIVERSE_STATE_TTL_SEC = 120
 
 
@@ -521,11 +541,21 @@ async def _on_bar(
     if _et_time_after(last_bar.timestamp, force_flat) and shadow_state.has_position(symbol):
         pos = shadow_state.get_position(symbol)
         if pos:
-            # Paper mode: submit close order to Alpaca for this symbol
+            # Paper mode: submit close order to Alpaca (requires config + Redis armed; no static fallback)
             execution_mode = getattr(settings, "execution_mode", "shadow")
             paper_enabled = getattr(settings, "paper_execution_enabled", False)
-            if execution_mode == "paper" and paper_enabled:
-                await asyncio.to_thread(_paper_force_flat_close, symbol)
+            paper_armed_config = getattr(settings, "paper_trading_armed", False)
+            try:
+                paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
+            except Exception:
+                paper_armed_redis = False
+            paper_armed = paper_armed_config and paper_armed_redis
+            if execution_mode == "paper" and paper_enabled and paper_armed:
+                allow, block_reason = await _paper_allowed_universe(redis_client)
+                if allow:
+                    await asyncio.to_thread(_paper_force_flat_close, symbol)
+                else:
+                    logger.warning("paper_force_flat_skipped symbol=%s reason=%s", symbol, block_reason)
             bid = sym_state.latest_bid or last_bar.close
             ask = sym_state.latest_ask or last_bar.close
             exit_price_ideal = compute_exit_fill(pos.side, bid, ask, ShadowFillParams("ideal", 0, Decimal("0")))
@@ -822,8 +852,22 @@ async def _on_bar(
     qty = Decimal("100")
     execution_mode_val = getattr(settings, "execution_mode", "shadow")
     paper_enabled = getattr(settings, "paper_execution_enabled", False)
+    paper_armed_config = getattr(settings, "paper_trading_armed", False)
+    try:
+        paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
+    except Exception:
+        paper_armed_redis = False
+    paper_armed = paper_armed_config and paper_armed_redis
     order_type_default = getattr(settings, "order_type_default", "market") or "market"
-    if execution_mode_val == "paper" and paper_enabled:
+    # Block strategy paper if gateway or worker is on static fallback
+    if execution_mode_val == "paper" and paper_enabled and paper_armed:
+        allow, block_reason = await _paper_allowed_universe(redis_client)
+        if not allow:
+            if eval_result.reason_codes is None:
+                eval_result.reason_codes = []
+            eval_result.reason_codes.append(block_reason or "paper_blocked_static_fallback")
+            paper_armed = False  # skip paper sizing and submission below
+    if execution_mode_val == "paper" and paper_enabled and paper_armed:
         def _get_account_positions_and_size() -> tuple[Decimal, str | None]:
             from stockbot.alpaca.client import AlpacaClient
             try:
@@ -890,8 +934,8 @@ async def _on_bar(
         )
         await store.insert_signal(event)
 
-    # Paper order submission after signal persisted (client_order_id = signal_uuid)
-    if execution_mode_val == "paper" and paper_enabled and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
+    # Paper order submission after signal persisted (client_order_id = signal_uuid). Requires paper_trading_armed.
+    if execution_mode_val == "paper" and paper_enabled and paper_armed and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
         ok, order_id, reason = await asyncio.to_thread(
             _submit_paper_order, str(signal_uuid), symbol, side_str, qty, order_type_default
         )
