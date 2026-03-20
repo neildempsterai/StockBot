@@ -498,6 +498,9 @@ def _snapshot_to_dict(snap: SymbolIntelligenceSnapshot | None) -> dict | None:
         "scrappy_version": snap.scrappy_version,
         "headline_count": headline_count,
         "headlines": headline_set[:10] if isinstance(headline_set, list) else [],
+        "coverage_status": coverage.status,
+        "coverage_reason": coverage.reason,
+        "coverage_latest_evidence_ts": coverage.latest_evidence_ts.isoformat() if coverage.latest_evidence_ts else None,
     }
     return out
 
