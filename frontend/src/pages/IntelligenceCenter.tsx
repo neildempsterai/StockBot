@@ -203,6 +203,14 @@ export function IntelligenceCenter() {
         <RefreshBadge dataUpdatedAt={dataUpdatedAt} isFetching={isFetching} intervalSec={30} />
       </div>
 
+      {/* PHASE 6: Session alignment - show current session context */}
+      {sessionInfo && sessionInfo.session && sessionInfo.session !== 'premarket' && (
+        <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-info)' }}>
+          <strong>Current session: {formatSession(sessionInfo.session)}.</strong> Premarket Prep is mainly for before the bell. 
+          The platform continues to scan and research during market hours, but AI Referee premarket runner only runs during premarket.
+        </div>
+      )}
+      
       {/* Premarket Readiness Header */}
       <section className="dashboard-section">
         <SectionHeader

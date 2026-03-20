@@ -84,6 +84,17 @@ export function CommandCenter() {
     queryFn: () => apiGet<IntelligenceSummaryResponse>(ENDPOINTS.intelligenceSummary),
     refetchInterval: 30_000,
   });
+  const { data: rejectionSummary } = useQuery({
+    queryKey: ['signalsRejectionSummary'],
+    queryFn: () => apiGet<{
+      recent_rejections?: Record<string, number>;
+      session?: string;
+      entry_window?: string;
+      in_entry_window?: boolean;
+      top_rejection_reasons?: Array<[string, number]>;
+    }>(ENDPOINTS.signalsRejectionSummary),
+    refetchInterval: 30_000,
+  });
 
   if (healthLoading) {
     return (
@@ -158,6 +169,19 @@ export function CommandCenter() {
                 : 'No runs yet'
             }
           />
+          {/* PHASE 5: Rejection visibility */}
+          {rejectionSummary && rejectionSummary.top_rejection_reasons && rejectionSummary.top_rejection_reasons.length > 0 && (
+            <KPICard
+              title="Recent Rejections"
+              value={rejectionSummary.top_rejection_reasons[0]?.[1] ?? 0}
+              subtitle={
+                rejectionSummary.top_rejection_reasons[0]?.[0] === 'outside_entry_window'
+                  ? `Outside entry window (${rejectionSummary.entry_window || '09:35-11:30 ET'})`
+                  : `Top: ${rejectionSummary.top_rejection_reasons[0]?.[0]}`
+              }
+              valueClass="pnl--negative"
+            />
+          )}
           <KPICard
             title="Scrappy Auto"
             value={scrappyStatus?.scrappy_auto_enabled ? 'On' : 'Off'}

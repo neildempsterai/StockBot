@@ -46,6 +46,17 @@ export function LiveSignalFeed() {
     queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
     refetchInterval: 15_000,
   });
+  const { data: rejectionSummary } = useQuery({
+    queryKey: ['signalsRejectionSummary'],
+    queryFn: () => apiGet<{
+      recent_rejections?: Record<string, number>;
+      session?: string;
+      entry_window?: string;
+      in_entry_window?: boolean;
+      top_rejection_reasons?: Array<[string, number]>;
+    }>(ENDPOINTS.signalsRejectionSummary),
+    refetchInterval: 30_000,
+  });
   
   // Create a set of signal UUIDs that have open paper positions
   const openPaperSignalUuids = new Set(
@@ -77,10 +88,39 @@ export function LiveSignalFeed() {
       <h1 className="page-title">Live Signals</h1>
       <SectionHeader title="Recent signals" subtitle="Strategy-generated signals (deterministic authority)" />
       {signals.length === 0 ? (
-        <EmptyState 
-          message="No deterministic strategy signals yet. This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals. Focus symbols and premarket prep appear on other pages."
-          icon="⚡" 
-        />
+        <div>
+          <EmptyState 
+            message={
+              !rejectionSummary?.in_entry_window && rejectionSummary?.session && rejectionSummary.session !== 'premarket'
+                ? `No signals — strategy entry window is ${rejectionSummary.entry_window || '09:35-11:30 ET'}. Current session: ${rejectionSummary.session}. Outside the entry window, candidates may be discovered but will be rejected for new entries.`
+                : rejectionSummary?.top_rejection_reasons && rejectionSummary.top_rejection_reasons.length > 0
+                ? `No signals yet. Recent rejections: ${rejectionSummary.top_rejection_reasons.map(([reason, count]) => `${reason} (${count})`).join(', ')}. This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals.`
+                : "No deterministic strategy signals yet. This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals. Focus symbols and premarket prep appear on other pages."
+            }
+            icon="⚡" 
+          />
+          {rejectionSummary && (
+            <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-info)' }}>
+              <div><strong>Strategy entry window:</strong> {rejectionSummary.entry_window || '09:35-11:30 ET'}</div>
+              <div style={{ marginTop: '0.5rem' }}>
+                <strong>Current status:</strong> {
+                  rejectionSummary.in_entry_window 
+                    ? 'Within entry window — strategy can generate signals'
+                    : `Outside entry window — candidates will be rejected for new entries (current: ${rejectionSummary.session || 'unknown'})`
+                }
+              </div>
+              {rejectionSummary.top_rejection_reasons && rejectionSummary.top_rejection_reasons.length > 0 && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <strong>Recent rejections (last 30 min):</strong> {
+                    rejectionSummary.top_rejection_reasons.map(([reason, count]) => 
+                      `${reason}: ${count}`
+                    ).join(', ')
+                  }
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       ) : (
         <div className="table-wrap">
           <table className="data-table">

@@ -6,6 +6,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import redis.asyncio as redis
@@ -52,6 +53,7 @@ from stockbot.db.models import (
     ScannerRun,
     ScannerToplistSnapshot,
     ScrappyAutoRun,
+    ScrappyGateRejection,
     ShadowTrade,
     Signal,
     SymbolIntelligenceSnapshot,
@@ -423,6 +425,73 @@ async def list_strategies() -> dict:
     }
 
 
+@app.get("/v1/signals/rejection-summary")
+async def get_signals_rejection_summary() -> dict:
+    """Recent candidate rejection reasons summary for operator visibility."""
+    try:
+        from datetime import UTC, datetime, timedelta
+        from stockbot.scrappy.store import get_gate_rejection_counts
+        factory = get_session_factory()
+        
+        # Get rejections from last 30 minutes
+        recent_rejections: dict[str, int] = {}
+        try:
+            async with factory() as session:
+                # Get all recent rejections (last 30 minutes)
+                cutoff = datetime.now(UTC) - timedelta(minutes=30)
+                r = await session.execute(
+                    select(ScrappyGateRejection.reason_code, func.count(ScrappyGateRejection.id))
+                    .where(ScrappyGateRejection.created_at >= cutoff)
+                    .group_by(ScrappyGateRejection.reason_code)
+                )
+                recent_rejections = {row[0]: row[1] for row in r.all()}
+        except Exception:
+            pass
+        
+        # Get current session and entry window status
+        from stockbot.market_sessions import current_session
+        from stockbot.config import get_settings
+        settings = get_settings()
+        session_label = current_session()
+        entry_start = getattr(settings, "entry_start_et", "09:35")
+        entry_end = getattr(settings, "entry_end_et", "11:30")
+        
+        # Check if currently in entry window
+        now_utc = datetime.now(UTC)
+        try:
+            import zoneinfo
+            et = zoneinfo.ZoneInfo("America/New_York")
+            et_now = now_utc.astimezone(et)
+            et_time_str = et_now.strftime("%H:%M")
+            in_entry_window = entry_start <= et_time_str <= entry_end
+        except Exception:
+            in_entry_window = False
+        
+        result = {
+            "recent_rejections": recent_rejections,
+            "session": session_label,
+            "entry_window": f"{entry_start}-{entry_end} ET",
+            "in_entry_window": in_entry_window,
+            "top_rejection_reasons": sorted(
+                recent_rejections.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:5],
+        }
+        return _sanitize_json_value(result)
+    except Exception as e:
+        logger.exception("Error in get_signals_rejection_summary")
+        return _sanitize_json_value({
+            "error": "internal_error",
+            "message": str(e)[:200],
+            "recent_rejections": {},
+            "session": "unknown",
+            "entry_window": "09:35-11:30 ET",
+            "in_entry_window": False,
+            "top_rejection_reasons": [],
+        })
+
+
 @app.get("/v1/signals")
 async def list_signals(
     limit: int = Query(default=50, ge=1, le=200),
@@ -549,6 +618,31 @@ async def _get_latest_snapshots_for_symbols(session, symbols: list[str]) -> dict
             seen.add(sym)
             result[sym] = row
     return result
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    """Sanitize value for JSON serialization: convert NaN/Infinity to None, ensure all values are JSON-serializable."""
+    import math
+    from datetime import datetime
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, (int, str, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_json_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _sanitize_json_value(v) for k, v in value.items()}
+    # For other types, convert to string as fallback
+    try:
+        return str(value)
+    except Exception:
+        return None
 
 
 def _referee_assessment_to_dict(a: AiRefereeAssessment | None) -> dict | None:
@@ -1699,14 +1793,25 @@ async def ai_referee_recent(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """Recent AI referee assessments, optionally by symbol."""
-    factory = get_session_factory()
-    async with factory() as session:
-        rows = await list_recent_assessments(session, symbol=symbol, limit=limit)
-    return {
-        "assessments": [_referee_assessment_to_dict(r) for r in rows],
-        "count": len(rows),
-        "symbol_filter": symbol,
-    }
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            rows = await list_recent_assessments(session, symbol=symbol, limit=limit)
+        result = {
+            "assessments": [_referee_assessment_to_dict(r) for r in rows],
+            "count": len(rows),
+            "symbol_filter": symbol,
+        }
+        return _sanitize_json_value(result)
+    except Exception as e:
+        logger.exception("Error in ai_referee_recent")
+        return _sanitize_json_value({
+            "error": "internal_error",
+            "message": str(e)[:200],
+            "assessments": [],
+            "count": 0,
+            "symbol_filter": symbol,
+        })
 
 
 @app.get("/v1/ai-referee/status")
@@ -2185,120 +2290,145 @@ async def get_scanner_summary() -> dict:
 @app.get("/v1/opportunities/now")
 async def get_opportunities_now() -> dict:
     """Top current candidates (live only). Prefers opportunity engine; includes Scrappy enrichment when present."""
-    from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
-    from stockbot.scanner.store import get_latest_live_scanner_result
-    from sqlalchemy import select
-    from stockbot.db.models import ScannerCandidateRow
-    run_id, updated_at, candidates = await get_latest_opportunity_run_and_candidates()
-    if run_id and candidates:
-        opportunities = []
-        scrappy_symbols = [c["symbol"] for c in candidates if c.get("scrappy_present")]
-        snapshot_map: dict[str, SymbolIntelligenceSnapshot] = {}
-        market_data_map: dict[str, dict] = {}  # symbol -> {price, gap_pct, spread_bps}
-        factory = get_session_factory()
-        async with factory() as session:
-            snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
-            # Fetch market data (price/gap/spread) from scanner run that matches opportunity run_id
-            # Opportunity run_id is the same as the scanner run_id that created it
-            symbol_list = [(c["symbol"] or "").strip().upper() for c in candidates if c.get("symbol")]
-            if symbol_list and run_id:
-                r = await session.execute(
-                    select(ScannerCandidateRow)
-                    .where(ScannerCandidateRow.run_id == run_id)
-                    .where(ScannerCandidateRow.symbol.in_(symbol_list))
-                )
-                scanner_rows = r.scalars().all()
-                for row in scanner_rows:
-                    symbol_key = (row.symbol or "").strip().upper()
-                    if symbol_key:
-                        market_data_map[symbol_key] = {
-                            "price": float(row.price) if row.price is not None else None,
-                            "gap_pct": row.gap_pct,
-                            "spread_bps": row.spread_bps,
-                        }
-                # If no matches found with opportunity run_id, try latest scanner run as fallback
-                if not market_data_map:
-                    scanner_result = await get_latest_live_scanner_result(session)
-                    if scanner_result and scanner_result.run_id:
-                        r2 = await session.execute(
-                            select(ScannerCandidateRow)
-                            .where(ScannerCandidateRow.run_id == scanner_result.run_id)
-                            .where(ScannerCandidateRow.symbol.in_(symbol_list))
-                        )
-                        scanner_rows2 = r2.scalars().all()
-                        for row in scanner_rows2:
-                            symbol_key = (row.symbol or "").strip().upper()
-                            if symbol_key and symbol_key not in market_data_map:
-                                market_data_map[symbol_key] = {
-                                    "price": float(row.price) if row.price is not None else None,
-                                    "gap_pct": row.gap_pct,
-                                    "spread_bps": row.spread_bps,
-                                }
-        for c in candidates:
-            symbol_upper = (c["symbol"] or "").upper()
-            market_data = market_data_map.get(symbol_upper, {})
-            base = {
-                "symbol": c["symbol"],
-                "rank": c["rank"],
-                "total_score": c["total_score"],
-                "market_score": c.get("market_score"),
-                "semantic_score": c.get("semantic_score"),
-                "candidate_source": c.get("candidate_source"),
-                "inclusion_reasons": c.get("inclusion_reasons") or [],
-                "component_scores": {},
-                "reason_codes": c.get("inclusion_reasons") or [],
-                "price": market_data.get("price"),
-                "gap_pct": market_data.get("gap_pct"),
-                "spread_bps": market_data.get("spread_bps"),
+    try:
+        from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+        from stockbot.scanner.store import get_latest_live_scanner_result
+        from sqlalchemy import select
+        from stockbot.db.models import ScannerCandidateRow
+        run_id, updated_at, candidates = await get_latest_opportunity_run_and_candidates()
+        if run_id and candidates:
+            opportunities = []
+            # PHASE 2 FIX: Check actual snapshots for ALL focus symbols, not just those with scrappy_present=True
+            # This ensures UI shows real research coverage even when candidate row flag is stale
+            all_symbols = [c["symbol"] for c in candidates if c.get("symbol")]
+            snapshot_map: dict[str, SymbolIntelligenceSnapshot] = {}
+            market_data_map: dict[str, dict] = {}  # symbol -> {price, gap_pct, spread_bps}
+            factory = get_session_factory()
+            async with factory() as session:
+                # Look up snapshots for ALL symbols, not just those marked scrappy_present
+                snapshot_map = await _get_latest_snapshots_for_symbols(session, all_symbols)
+                # Fetch market data (price/gap/spread) from scanner run that matches opportunity run_id
+                # Opportunity run_id is the same as the scanner run_id that created it
+                symbol_list = [(c["symbol"] or "").strip().upper() for c in candidates if c.get("symbol")]
+                if symbol_list and run_id:
+                    r = await session.execute(
+                        select(ScannerCandidateRow)
+                        .where(ScannerCandidateRow.run_id == run_id)
+                        .where(ScannerCandidateRow.symbol.in_(symbol_list))
+                    )
+                    scanner_rows = r.scalars().all()
+                    for row in scanner_rows:
+                        symbol_key = (row.symbol or "").strip().upper()
+                        if symbol_key:
+                            market_data_map[symbol_key] = {
+                                "price": float(row.price) if row.price is not None else None,
+                                "gap_pct": row.gap_pct,
+                                "spread_bps": row.spread_bps,
+                            }
+                    # If no matches found with opportunity run_id, try latest scanner run as fallback
+                    if not market_data_map:
+                        scanner_result = await get_latest_live_scanner_result(session)
+                        if scanner_result and scanner_result.run_id:
+                            r2 = await session.execute(
+                                select(ScannerCandidateRow)
+                                .where(ScannerCandidateRow.run_id == scanner_result.run_id)
+                                .where(ScannerCandidateRow.symbol.in_(symbol_list))
+                            )
+                            scanner_rows2 = r2.scalars().all()
+                            for row in scanner_rows2:
+                                symbol_key = (row.symbol or "").strip().upper()
+                                if symbol_key and symbol_key not in market_data_map:
+                                    market_data_map[symbol_key] = {
+                                        "price": float(row.price) if row.price is not None else None,
+                                        "gap_pct": row.gap_pct,
+                                        "spread_bps": row.spread_bps,
+                                    }
+            for c in candidates:
+                symbol_upper = (c["symbol"] or "").upper()
+                market_data = market_data_map.get(symbol_upper, {})
+                base = {
+                    "symbol": c["symbol"],
+                    "rank": c["rank"],
+                    "total_score": c["total_score"],
+                    "market_score": c.get("market_score"),
+                    "semantic_score": c.get("semantic_score"),
+                    "candidate_source": c.get("candidate_source"),
+                    "inclusion_reasons": c.get("inclusion_reasons") or [],
+                    "component_scores": {},
+                    "reason_codes": c.get("inclusion_reasons") or [],
+                    "price": market_data.get("price"),
+                    "gap_pct": market_data.get("gap_pct"),
+                    "spread_bps": market_data.get("spread_bps"),
                 "scrappy_present": c.get("scrappy_present", False),
             }
+            # PHASE 2 FIX: Always check actual snapshot existence, update scrappy_present based on reality
             snap = snapshot_map.get(symbol_upper)
             if snap:
                 base.update(_snapshot_to_scrappy_enrichment(snap))
-            opportunities.append(base)
-        return {"opportunities": opportunities, "run_id": run_id, "updated_at": updated_at}
-    factory = get_session_factory()
-    async with factory() as session:
-        top_snap = await get_latest_live_toplist_snapshot(session)
-        if not top_snap or not top_snap.run_id:
-            return {
-                "opportunities": [],
-                "run_id": None,
-                "updated_at": None,
-                "source": "none",
-                "reason": "no_live_scanner_run",
+                base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
+            else:
+                base["scrappy_present"] = False  # Ensure flag reflects reality
+            opportunities.append(_sanitize_json_value(base))
+            result = {"opportunities": opportunities, "run_id": run_id, "updated_at": updated_at}
+            return _sanitize_json_value(result)
+        
+        factory = get_session_factory()
+        async with factory() as session:
+            top_snap = await get_latest_live_toplist_snapshot(session)
+            if not top_snap or not top_snap.run_id:
+                return _sanitize_json_value({
+                    "opportunities": [],
+                    "run_id": None,
+                    "updated_at": None,
+                    "source": "none",
+                    "reason": "no_live_scanner_run",
+                })
+            candidates = await get_candidates_for_run(
+                session, top_snap.run_id, status="top_candidate", limit=50
+            )
+            # PHASE 2 FIX: Check actual snapshots for ALL symbols, not just those with scrappy_present=True
+            all_symbols = [c.symbol for c in candidates if c.symbol]
+            snapshot_map = await _get_latest_snapshots_for_symbols(session, all_symbols)
+        opportunities = []
+        for c in candidates:
+            base = {
+                "symbol": c.symbol,
+                "rank": c.rank,
+                "total_score": c.total_score,
+                "market_score": None,
+                "semantic_score": None,
+                "candidate_source": "market",
+                "component_scores": c.component_scores_json or {},
+                "reason_codes": c.reason_codes_json or [],
+                "inclusion_reasons": c.reason_codes_json or [],
+                "price": float(c.price) if c.price else None,
+                "gap_pct": c.gap_pct,
+                "spread_bps": c.spread_bps,
+                "scrappy_present": c.scrappy_present or False,
             }
-        candidates = await get_candidates_for_run(
-            session, top_snap.run_id, status="top_candidate", limit=50
-        )
-        scrappy_symbols = [c.symbol for c in candidates if c.scrappy_present]
-        snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
-    opportunities = []
-    for c in candidates:
-        base = {
-            "symbol": c.symbol,
-            "rank": c.rank,
-            "total_score": c.total_score,
-            "market_score": None,
-            "semantic_score": None,
-            "candidate_source": "market",
-            "component_scores": c.component_scores_json or {},
-            "reason_codes": c.reason_codes_json or [],
-            "inclusion_reasons": c.reason_codes_json or [],
-            "price": float(c.price) if c.price else None,
-            "gap_pct": c.gap_pct,
-            "spread_bps": c.spread_bps,
-            "scrappy_present": c.scrappy_present or False,
+            # PHASE 2 FIX: Always check actual snapshot existence, update scrappy_present based on reality
+            snap = snapshot_map.get((c.symbol or "").strip())
+            if snap:
+                base.update(_snapshot_to_scrappy_enrichment(snap))
+                base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
+            else:
+                base["scrappy_present"] = False  # Ensure flag reflects reality
+            opportunities.append(_sanitize_json_value(base))
+        result = {
+            "opportunities": opportunities,
+            "run_id": top_snap.run_id,
+            "updated_at": top_snap.snapshot_ts.isoformat() if top_snap.snapshot_ts else None,
         }
-        snap = snapshot_map.get((c.symbol or "").strip())
-        if snap:
-            base.update(_snapshot_to_scrappy_enrichment(snap))
-        opportunities.append(base)
-    return {
-        "opportunities": opportunities,
-        "run_id": top_snap.run_id,
-        "updated_at": top_snap.snapshot_ts.isoformat() if top_snap.snapshot_ts else None,
-    }
+        return _sanitize_json_value(result)
+    except Exception as e:
+        logger.exception("Error in get_opportunities_now")
+        return _sanitize_json_value({
+            "error": "internal_error",
+            "message": str(e)[:200],
+            "opportunities": [],
+            "run_id": None,
+            "updated_at": None,
+        })
 
 
 def _session_allowed_and_reason() -> tuple[str, bool, bool, str | None]:
@@ -2417,249 +2547,322 @@ async def get_opportunities_symbol(symbol: str) -> dict:
 @app.get("/v1/scrappy/status")
 async def get_scrappy_status() -> dict:
     """Scrappy automation status: last auto-run, watchlist size, auto-enabled, with truthful failure tracking."""
-    from stockbot.config import get_settings
-    from stockbot.scrappy.run_service import get_watchlist_symbols_list
-    from datetime import UTC, datetime, timedelta
-    import redis.asyncio as redis
-    import json
-    settings = get_settings()
-    auto_enabled = getattr(settings, "scrappy_auto_enabled", True)
-    watchlist = await get_watchlist_symbols_list()
-    factory = get_session_factory()
-    async with factory() as session:
-        r = await session.execute(
-            select(ScrappyAutoRun).order_by(ScrappyAutoRun.run_ts.desc()).limit(1)
-        )
-        last_auto = r.scalars().first()
-    
-    # Get Redis state for last attempt, failure reason, symbols
-    last_attempt_ts = None
-    last_failure_reason = None
-    last_outcome = None
-    last_symbols_requested = []
-    last_symbols_researched = []
     try:
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        last_attempt_ts = await r.get("stockbot:scrappy_auto:last_attempt_ts")
-        last_failure_reason = await r.get("stockbot:scrappy_auto:last_failure_reason")
-        last_outcome = await r.get("stockbot:scrappy_auto:last_outcome")
-        symbols_req_json = await r.get("stockbot:scrappy_auto:last_symbols_requested")
-        symbols_res_json = await r.get("stockbot:scrappy_auto:last_symbols_researched")
-        await r.aclose()
-        if symbols_req_json:
-            try:
-                last_symbols_requested = json.loads(symbols_req_json)
-            except Exception:
-                pass
-        if symbols_res_json:
-            try:
-                last_symbols_researched = json.loads(symbols_res_json)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    
-    # Determine service health: healthy if no recent auth errors and last attempt was recent
-    service_health = "unknown"
-    service_health_reason = None
-    if last_failure_reason:
-        if "password authentication failed" in last_failure_reason.lower() or "invalidpassword" in last_failure_reason.lower():
-            service_health = "failed"
-            service_health_reason = f"auth_error: {last_failure_reason}"
-        else:
-            service_health = "degraded"
-            service_health_reason = last_failure_reason
-    elif last_attempt_ts:
+        from stockbot.config import get_settings
+        from stockbot.scrappy.run_service import get_watchlist_symbols_list
+        from datetime import UTC, datetime, timedelta
+        import redis.asyncio as redis
+        import json
+        settings = get_settings()
+        auto_enabled = getattr(settings, "scrappy_auto_enabled", True)
+        watchlist = await get_watchlist_symbols_list()
+        factory = get_session_factory()
+        
+        last_auto = None
+        async with factory() as session:
+            r = await session.execute(
+                select(ScrappyAutoRun).order_by(ScrappyAutoRun.run_ts.desc()).limit(1)
+            )
+            last_auto = r.scalars().first()
+        
+        # Get Redis state for last attempt, failure reason, symbols
+        last_attempt_ts = None
+        last_failure_reason = None
+        last_outcome = None
+        last_symbols_requested = []
+        last_symbols_researched = []
         try:
-            attempt_dt = datetime.fromisoformat(last_attempt_ts.replace("Z", "+00:00"))
-            age_minutes = (datetime.now(UTC) - attempt_dt.replace(tzinfo=UTC)).total_seconds() / 60
-            if age_minutes < 120:  # Recent attempt within 2 hours
-                if last_outcome and last_outcome not in ("failed", "skipped"):
-                    service_health = "healthy"
-                elif last_outcome == "skipped":
-                    service_health = "healthy"  # Skipped is normal (e.g., no symbols)
-                    service_health_reason = "skipped (no symbols or outside session)"
-                else:
-                    service_health = "unknown"
-            else:
-                service_health = "stale"
-                service_health_reason = f"last_attempt_{int(age_minutes)}_minutes_ago"
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            last_attempt_ts = await r.get("stockbot:scrappy_auto:last_attempt_ts")
+            last_failure_reason = await r.get("stockbot:scrappy_auto:last_failure_reason")
+            last_outcome = await r.get("stockbot:scrappy_auto:last_outcome")
+            symbols_req_json = await r.get("stockbot:scrappy_auto:last_symbols_requested")
+            symbols_res_json = await r.get("stockbot:scrappy_auto:last_symbols_researched")
+            await r.aclose()
+            if symbols_req_json:
+                try:
+                    last_symbols_requested = json.loads(symbols_req_json)
+                except Exception:
+                    pass
+            if symbols_res_json:
+                try:
+                    last_symbols_researched = json.loads(symbols_res_json)
+                except Exception:
+                    pass
         except Exception:
             pass
-    elif last_auto and last_auto.run_ts:
-        age_minutes = (datetime.now(UTC) - last_auto.run_ts.replace(tzinfo=UTC)).total_seconds() / 60
-        if age_minutes < 120:
-            service_health = "healthy"
-        else:
-            service_health = "stale"
-            service_health_reason = f"last_run_{int(age_minutes)}_minutes_ago"
-    
-    # Calculate coverage status counts for focus symbols
-    coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
-    try:
-        from stockbot.scrappy.snapshot import classify_coverage_status
-        import redis.asyncio as redis
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        scanner_top_json = await r.get("stockbot:scanner:top_symbols")
-        await r.aclose()
-        focus_symbols = []
-        if scanner_top_json:
+        
+        # Determine service health: healthy if no recent auth errors and last attempt was recent
+        service_health = "unknown"
+        service_health_reason = None
+        if last_failure_reason:
+            if "password authentication failed" in last_failure_reason.lower() or "invalidpassword" in last_failure_reason.lower():
+                service_health = "failed"
+                service_health_reason = f"auth_error: {last_failure_reason}"
+            else:
+                service_health = "degraded"
+                service_health_reason = last_failure_reason
+        elif last_attempt_ts:
             try:
-                focus_symbols = json.loads(scanner_top_json)
-                if isinstance(focus_symbols, list):
-                    focus_symbols = [s.strip().upper() for s in focus_symbols if s][:20]
+                attempt_dt = datetime.fromisoformat(last_attempt_ts.replace("Z", "+00:00"))
+                age_minutes = (datetime.now(UTC) - attempt_dt.replace(tzinfo=UTC)).total_seconds() / 60
+                if age_minutes < 120:  # Recent attempt within 2 hours
+                    if last_outcome and last_outcome not in ("failed", "skipped"):
+                        service_health = "healthy"
+                    elif last_outcome == "skipped":
+                        service_health = "healthy"  # Skipped is normal (e.g., no symbols)
+                        service_health_reason = "skipped (no symbols or outside session)"
+                    else:
+                        service_health = "unknown"
+                else:
+                    service_health = "stale"
+                    service_health_reason = f"last_attempt_{int(age_minutes)}_minutes_ago"
             except Exception:
                 pass
+        elif last_auto and last_auto.run_ts:
+            age_minutes = (datetime.now(UTC) - last_auto.run_ts.replace(tzinfo=UTC)).total_seconds() / 60
+            if age_minutes < 120:
+                service_health = "healthy"
+            else:
+                service_health = "stale"
+                service_health_reason = f"last_run_{int(age_minutes)}_minutes_ago"
         
-        if focus_symbols:
-            async with factory() as session:
-                for sym in focus_symbols:
-                    snap = await get_latest_snapshot_by_symbol(session, sym)
-                    coverage = classify_coverage_status(snap)
-                    if coverage.status in coverage_counts:
-                        coverage_counts[coverage.status] += 1
-    except Exception:
-        pass
-    
-    return {
-        "scrappy_auto_enabled": auto_enabled,
-        "service_health": service_health,
-        "service_health_reason": service_health_reason,
-        "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
-        "last_attempt_at": last_attempt_ts,
-        "last_run_id": last_auto.run_id if last_auto else None,
-        "last_outcome": last_outcome or (last_auto.status if last_auto else None),
-        "last_failure_reason": last_failure_reason,
-        "last_notes_created": last_auto.notes_created if last_auto else 0,
-        "last_snapshots_updated": last_auto.snapshots_updated if last_auto else 0,
-        "last_symbols_requested": last_symbols_requested,
-        "last_symbols_researched": last_symbols_researched,
-        "watchlist_size": len(watchlist) if watchlist else 0,
-        "coverage_counts": coverage_counts,
-    }
+        # Calculate coverage status counts for focus symbols
+        coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
+        try:
+            from stockbot.scrappy.snapshot import classify_coverage_status
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            scanner_top_json = await r.get("stockbot:scanner:top_symbols")
+            await r.aclose()
+            focus_symbols = []
+            if scanner_top_json:
+                try:
+                    focus_symbols = json.loads(scanner_top_json)
+                    if isinstance(focus_symbols, list):
+                        focus_symbols = [s.strip().upper() for s in focus_symbols if s][:20]
+                except Exception:
+                    pass
+            
+            if focus_symbols:
+                async with factory() as session:
+                    for sym in focus_symbols:
+                        try:
+                            snap = await get_latest_snapshot_by_symbol(session, sym)
+                            coverage = classify_coverage_status(snap)
+                            if coverage.status in coverage_counts:
+                                coverage_counts[coverage.status] += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        
+        result = {
+            "scrappy_auto_enabled": auto_enabled,
+            "service_health": service_health,
+            "service_health_reason": service_health_reason,
+            "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
+            "last_attempt_at": last_attempt_ts,
+            "last_run_id": last_auto.run_id if last_auto else None,
+            "last_outcome": last_outcome or (last_auto.status if last_auto else None),
+            "last_failure_reason": last_failure_reason,
+            "last_notes_created": last_auto.notes_created if last_auto else 0,
+            "last_snapshots_updated": last_auto.snapshots_updated if last_auto else 0,
+            "last_symbols_requested": last_symbols_requested,
+            "last_symbols_researched": last_symbols_researched,
+            "watchlist_size": len(watchlist) if watchlist else 0,
+            "coverage_counts": coverage_counts,
+        }
+        return _sanitize_json_value(result)
+    except Exception as e:
+        logger.exception("Error in get_scrappy_status")
+        return {
+            "error": "internal_error",
+            "message": str(e)[:200],
+            "scrappy_auto_enabled": False,
+            "service_health": "error",
+            "service_health_reason": f"exception: {type(e).__name__}",
+            "last_run_at": None,
+            "last_attempt_at": None,
+            "last_run_id": None,
+            "last_outcome": None,
+            "last_failure_reason": None,
+            "last_notes_created": 0,
+            "last_snapshots_updated": 0,
+            "last_symbols_requested": [],
+            "last_symbols_researched": [],
+            "watchlist_size": 0,
+            "coverage_counts": {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0},
+        }
 
 
 @app.get("/v1/premarket/status")
 async def get_premarket_status() -> dict:
     """Comprehensive premarket status: scanner, opportunities, Scrappy coverage, AI Referee, overall state."""
-    from datetime import UTC, datetime
-    from stockbot.config import get_settings
-    from stockbot.market_sessions import current_session, is_premarket
-    from stockbot.scrappy.snapshot import classify_coverage_status
-    import redis.asyncio as redis
-    import json
-    
-    settings = get_settings()
-    session_label = current_session()
-    
-    # Get focus symbols from scanner/opportunities
-    focus_symbols = []
-    scanner_live = False
-    opportunities_count = 0
     try:
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        scanner_top_json = await r.get("stockbot:scanner:top_symbols")
-        scanner_top_ts = await r.get("stockbot:scanner:top_ts")
-        await r.aclose()
-        if scanner_top_json:
-            try:
-                focus_symbols = json.loads(scanner_top_json)
-                if isinstance(focus_symbols, list):
-                    focus_symbols = [s.strip().upper() for s in focus_symbols if s]
-            except Exception:
-                pass
-        if scanner_top_ts:
-            scanner_live = True
-    except Exception:
-        pass
-    
-    # Get opportunities count
-    try:
-        from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
-        _, _, candidates = await get_latest_opportunity_run_and_candidates()
-        if candidates:
-            opportunities_count = len(candidates)
-    except Exception:
-        pass
-    
-    # Get Scrappy status
-    scrappy_status = await get_scrappy_status()
-    
-    # Classify coverage for all focus symbols
-    coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
-    coverage_details: list[dict] = []
-    factory = get_session_factory()
-    async with factory() as session:
-        for sym in focus_symbols[:20]:
-            snap = await get_latest_snapshot_by_symbol(session, sym)
-            coverage = classify_coverage_status(snap)
-            if coverage.status in coverage_counts:
-                coverage_counts[coverage.status] += 1
-            coverage_details.append({
-                "symbol": sym,
-                "coverage_status": coverage.status,
-                "coverage_reason": coverage.reason,
-                "evidence_count": coverage.evidence_count,
-                "freshness_minutes": coverage.freshness_minutes,
-            })
-    
-    # Get AI Referee premarket status
-    ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
-    ai_referee_last_run = None
-    ai_referee_assessed = 0
-    ai_referee_skipped = 0
-    try:
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        ai_referee_last_run = await r.get("stockbot:ai_referee_premarket:last_run_ts")
-        await r.aclose()
-        # Count recent assessments
-        from stockbot.ai_referee.store import list_recent_assessments
-        async with factory() as session:
-            recent = await list_recent_assessments(session, limit=100)
-            ai_referee_assessed = len([a for a in recent if a.assessment_ts and (datetime.now(UTC) - a.assessment_ts.replace(tzinfo=UTC)).total_seconds() < 3600 * 4])
-    except Exception:
-        pass
-    
-    # Determine overall premarket state
-    overall_state = "not_running"
-    if scanner_live and opportunities_count > 0:
-        if coverage_counts["fresh_research"] > 0 or coverage_counts["carried_forward_research"] > 0:
-            overall_state = "alive"
-        elif coverage_counts["low_evidence"] > 0 or coverage_counts["no_research"] > 0:
-            overall_state = "degraded"
-        else:
+        from datetime import UTC, datetime
+        from stockbot.config import get_settings
+        from stockbot.market_sessions import current_session, is_premarket
+        from stockbot.scrappy.snapshot import classify_coverage_status
+        import redis.asyncio as redis
+        import json
+        
+        settings = get_settings()
+        session_label = current_session()
+        
+        # Get focus symbols from scanner/opportunities
+        focus_symbols = []
+        scanner_live = False
+        opportunities_count = 0
+        try:
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            scanner_top_json = await r.get("stockbot:scanner:top_symbols")
+            scanner_top_ts = await r.get("stockbot:scanner:top_ts")
+            await r.aclose()
+            if scanner_top_json:
+                try:
+                    focus_symbols = json.loads(scanner_top_json)
+                    if isinstance(focus_symbols, list):
+                        focus_symbols = [s.strip().upper() for s in focus_symbols if s]
+                except Exception:
+                    pass
+            if scanner_top_ts:
+                scanner_live = True
+        except Exception:
+            pass
+        
+        # Get opportunities count
+        try:
+            from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+            _, _, candidates = await get_latest_opportunity_run_and_candidates()
+            if candidates:
+                opportunities_count = len(candidates)
+        except Exception:
+            pass
+        
+        # Get Scrappy status (with error handling)
+        scrappy_status = {}
+        try:
+            scrappy_status = await get_scrappy_status()
+        except Exception:
+            scrappy_status = {
+                "scrappy_auto_enabled": False,
+                "last_run_at": None,
+                "last_attempt_at": None,
+                "last_failure_reason": "error_fetching_status",
+                "last_notes_created": 0,
+                "last_snapshots_updated": 0,
+                "coverage_counts": {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0},
+            }
+        
+        # Classify coverage for all focus symbols
+        coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
+        coverage_details: list[dict] = []
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                for sym in focus_symbols[:20]:
+                    try:
+                        snap = await get_latest_snapshot_by_symbol(session, sym)
+                        coverage = classify_coverage_status(snap)
+                        if coverage.status in coverage_counts:
+                            coverage_counts[coverage.status] += 1
+                        coverage_details.append({
+                            "symbol": sym,
+                            "coverage_status": coverage.status,
+                            "coverage_reason": coverage.reason,
+                            "evidence_count": coverage.evidence_count,
+                            "freshness_minutes": coverage.freshness_minutes,
+                        })
+                    except Exception:
+                        coverage_details.append({
+                            "symbol": sym,
+                            "coverage_status": "no_research",
+                            "coverage_reason": "error_checking_snapshot",
+                            "evidence_count": 0,
+                            "freshness_minutes": 0,
+                        })
+        except Exception:
+            pass
+        
+        # Get AI Referee premarket status
+        ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
+        ai_referee_last_run = None
+        ai_referee_assessed = 0
+        try:
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            ai_referee_last_run = await r.get("stockbot:ai_referee_premarket:last_run_ts")
+            await r.aclose()
+            # Count recent assessments
+            from stockbot.ai_referee.store import list_recent_assessments
+            async with factory() as session:
+                recent = await list_recent_assessments(session, limit=100)
+                ai_referee_assessed = len([a for a in recent if a.assessment_ts and (datetime.now(UTC) - a.assessment_ts.replace(tzinfo=UTC)).total_seconds() < 3600 * 4])
+        except Exception:
+            pass
+        
+        # Determine overall premarket state
+        overall_state = "not_running"
+        if scanner_live and opportunities_count > 0:
+            if coverage_counts["fresh_research"] > 0 or coverage_counts["carried_forward_research"] > 0:
+                overall_state = "alive"
+            elif coverage_counts["low_evidence"] > 0 or coverage_counts["no_research"] > 0:
+                overall_state = "degraded"
+            else:
+                overall_state = "partial"
+        elif scanner_live:
             overall_state = "partial"
-    elif scanner_live:
-        overall_state = "partial"
-    
-    return {
-        "session": session_label,
-        "is_premarket": is_premarket(),
-        "overall_state": overall_state,
-        "scanner": {
-            "live": scanner_live,
-            "focus_symbols_count": len(focus_symbols),
-            "focus_symbols": focus_symbols[:20],
-        },
-        "opportunities": {
-            "count": opportunities_count,
-        },
-        "scrappy": {
-            "auto_enabled": scrappy_status.get("scrappy_auto_enabled"),
-            "last_run_at": scrappy_status.get("last_run_at"),
-            "last_attempt_at": scrappy_status.get("last_attempt_at"),
-            "last_failure_reason": scrappy_status.get("last_failure_reason"),
-            "last_notes_created": scrappy_status.get("last_notes_created"),
-            "last_snapshots_updated": scrappy_status.get("last_snapshots_updated"),
-            "coverage_counts": coverage_counts,
-        },
-        "ai_referee": {
-            "enabled": ai_referee_enabled,
-            "last_run_at": ai_referee_last_run,
-            "assessed_count_recent": ai_referee_assessed,
-        },
-        "coverage_details": coverage_details,
-    }
+        
+        result = {
+            "session": session_label,
+            "is_premarket": is_premarket(),
+            "overall_state": overall_state,
+            "scanner": {
+                "live": scanner_live,
+                "focus_symbols_count": len(focus_symbols),
+                "focus_symbols": focus_symbols[:20],
+            },
+            "opportunities": {
+                "count": opportunities_count,
+            },
+            "scrappy": {
+                "auto_enabled": scrappy_status.get("scrappy_auto_enabled"),
+                "last_run_at": scrappy_status.get("last_run_at"),
+                "last_attempt_at": scrappy_status.get("last_attempt_at"),
+                "last_failure_reason": scrappy_status.get("last_failure_reason"),
+                "last_notes_created": scrappy_status.get("last_notes_created"),
+                "last_snapshots_updated": scrappy_status.get("last_snapshots_updated"),
+                "coverage_counts": coverage_counts,
+            },
+            "ai_referee": {
+                "enabled": ai_referee_enabled,
+                "last_run_at": ai_referee_last_run,
+                "assessed_count_recent": ai_referee_assessed,
+            },
+            "coverage_details": coverage_details,
+        }
+        return _sanitize_json_value(result)
+    except Exception as e:
+        logger.exception("Error in get_premarket_status")
+        return {
+            "error": "internal_error",
+            "message": str(e)[:200],
+            "session": "unknown",
+            "is_premarket": False,
+            "overall_state": "error",
+            "scanner": {"live": False, "focus_symbols_count": 0, "focus_symbols": []},
+            "opportunities": {"count": 0},
+            "scrappy": {
+                "auto_enabled": False,
+                "last_run_at": None,
+                "last_attempt_at": None,
+                "last_failure_reason": f"exception: {type(e).__name__}",
+                "last_notes_created": 0,
+                "last_snapshots_updated": 0,
+                "coverage_counts": {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0},
+            },
+            "ai_referee": {"enabled": False, "last_run_at": None, "assessed_count_recent": 0},
+            "coverage_details": [],
+        }
 
 
 @app.get("/v1/scrappy/auto-runs")

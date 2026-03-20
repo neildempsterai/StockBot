@@ -45,6 +45,11 @@ export function AiReferee() {
     queryFn: () => apiGet<OpportunitiesNowResponse>(ENDPOINTS.opportunitiesNow),
     refetchInterval: 30_000,
   });
+  const { data: premarketStatus } = useQuery({
+    queryKey: ['premarketStatus'],
+    queryFn: () => apiGet<{ is_premarket?: boolean; session?: string }>(ENDPOINTS.premarketStatus),
+    refetchInterval: 30_000,
+  });
   
   // Create a map of symbols with open positions
   const symbolsWithOpenPositions = new Set(
@@ -57,13 +62,27 @@ export function AiReferee() {
   );
   const focusSymbols = opportunities?.opportunities ?? [];
   
-  // Calculate coverage
+  // PHASE 3 FIX: Determine assessability reasons for symbols without assessments
+  const isPremarket = premarketStatus?.is_premarket ?? false;
+  const currentSession = premarketStatus?.session ?? 'unknown';
+  
+  // Calculate coverage with assessability context
   const focusWithAssessment = focusSymbols.filter((o) =>
     assessmentMap.has(o.symbol?.toUpperCase())
   ).length;
-  const focusNeedingAssessment = focusSymbols.filter((o) =>
-    !assessmentMap.has(o.symbol?.toUpperCase())
-  ).length;
+  
+  // PHASE 3 FIX: Only count as "needing assessment" if actually assessable
+  const focusAssessable = focusSymbols.filter((o) => {
+    if (assessmentMap.has(o.symbol?.toUpperCase())) return false; // Already assessed
+    if (!aiRefereeEnabled) return false; // AI disabled
+    if (!isPremarket && currentSession !== 'premarket') return false; // Not premarket
+    if (!o.scrappy_present) return false; // No snapshot
+    const coverage = o.coverage_status;
+    if (coverage === 'no_research' || coverage === 'low_evidence') return false; // Insufficient research
+    return true; // Actually assessable
+  }).length;
+  
+  const focusNeedingAssessment = focusAssessable; // Use assessable count, not just "missing assessment"
 
   if (isLoading) {
     return (
@@ -117,7 +136,15 @@ export function AiReferee() {
           <KPICard
             title="Focus Coverage"
             value={`${focusWithAssessment}/${focusSymbols.length}`}
-            subtitle={focusNeedingAssessment > 0 ? `${focusNeedingAssessment} need assessment` : 'All assessed'}
+            subtitle={
+              !aiRefereeEnabled 
+                ? 'AI Referee disabled'
+                : !isPremarket && currentSession !== 'premarket'
+                ? `Not premarket (${currentSession})`
+                : focusNeedingAssessment > 0 
+                ? `${focusNeedingAssessment} assessable, need assessment`
+                : 'All assessable symbols assessed'
+            }
             valueClass={focusNeedingAssessment > 0 ? 'pnl--negative' : 'pnl--positive'}
           />
         </div>
@@ -127,9 +154,16 @@ export function AiReferee() {
             {paperRequired && ' Paper trading currently requires AI Referee.'}
           </div>
         )}
-        {aiRefereeEnabled && assessments.length === 0 && (
+        {aiRefereeEnabled && !isPremarket && currentSession !== 'premarket' && (
+          <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-info)' }}>
+            <strong>Current session: {currentSession}.</strong> AI Referee premarket runner only runs during premarket hours. 
+            Assessments shown here are from previous premarket runs.
+          </div>
+        )}
+        {aiRefereeEnabled && isPremarket && assessments.length === 0 && focusSymbols.length > 0 && (
           <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-warning)' }}>
-            <strong>No assessments yet.</strong> AI Referee runs when candidates reach the assessment stage. Check focus symbols in Premarket Prep.
+            <strong>No assessments yet.</strong> AI Referee premarket runner will assess focus symbols with fresh research. 
+            Check that symbols have snapshots and sufficient evidence.
           </div>
         )}
       </section>
@@ -226,12 +260,24 @@ export function AiReferee() {
       {focusSymbols.length > 0 && (
         <section className="dashboard-section">
           <SectionHeader
-            title="Focus Symbols Needing Assessment"
-            subtitle="Current focus symbols without AI Referee assessment"
+            title="Focus Symbols Assessment Status"
+            subtitle={
+              !aiRefereeEnabled 
+                ? "AI Referee is disabled"
+                : !isPremarket && currentSession !== 'premarket'
+                ? `Not premarket — AI Referee only runs during premarket (current: ${currentSession})`
+                : "Symbols that are assessable but not yet assessed"
+            }
           />
           {focusNeedingAssessment === 0 ? (
             <EmptyState
-              message="All focus symbols have been assessed."
+              message={
+                !aiRefereeEnabled
+                  ? "AI Referee is disabled. Enable AI_REFEREE_ENABLED to assess symbols."
+                  : !isPremarket && currentSession !== 'premarket'
+                  ? `All assessable symbols have been assessed. AI Referee only runs during premarket (current: ${currentSession}).`
+                  : "All assessable focus symbols have been assessed."
+              }
               icon="✓"
             />
           ) : (
@@ -248,7 +294,16 @@ export function AiReferee() {
                 </thead>
                 <tbody>
                   {focusSymbols
-                    .filter((o) => !assessmentMap.has(o.symbol?.toUpperCase()))
+                    .filter((o) => {
+                      if (assessmentMap.has(o.symbol?.toUpperCase())) return false;
+                      // PHASE 3 FIX: Only show symbols that are actually assessable
+                      if (!aiRefereeEnabled) return false;
+                      if (!isPremarket && currentSession !== 'premarket') return false;
+                      if (!o.scrappy_present) return false;
+                      const coverage = o.coverage_status;
+                      if (coverage === 'no_research' || coverage === 'low_evidence') return false;
+                      return true;
+                    })
                     .slice(0, 20)
                     .map((opp) => (
                       <tr key={opp.symbol}>
@@ -267,6 +322,55 @@ export function AiReferee() {
                         </td>
                       </tr>
                     ))}
+                  {/* PHASE 3 FIX: Show symbols that CAN'T be assessed with reasons */}
+                  {focusSymbols
+                    .filter((o) => {
+                      if (assessmentMap.has(o.symbol?.toUpperCase())) return false;
+                      // Show symbols that can't be assessed
+                      if (!aiRefereeEnabled) return true;
+                      if (!isPremarket && currentSession !== 'premarket') return true;
+                      if (!o.scrappy_present) return true;
+                      const coverage = o.coverage_status;
+                      if (coverage === 'no_research' || coverage === 'low_evidence') return true;
+                      return false; // This one is assessable, show it above
+                    })
+                    .slice(0, 10)
+                    .map((opp) => {
+                      let reason = '';
+                      if (!aiRefereeEnabled) {
+                        reason = 'AI Referee disabled';
+                      } else if (!isPremarket && currentSession !== 'premarket') {
+                        reason = `Not premarket (${currentSession})`;
+                      } else if (!opp.scrappy_present) {
+                        reason = 'No snapshot';
+                      } else {
+                        const coverage = opp.coverage_status;
+                        if (coverage === 'no_research') {
+                          reason = 'No research';
+                        } else if (coverage === 'low_evidence') {
+                          reason = 'Low evidence';
+                        } else {
+                          reason = 'Not assessable';
+                        }
+                      }
+                      return (
+                        <tr key={opp.symbol} style={{ opacity: 0.6 }}>
+                          <td>{opp.rank ?? '—'}</td>
+                          <td className="cell--symbol">{opp.symbol}</td>
+                          <td>{opp.total_score != null ? Number(opp.total_score).toFixed(2) : '—'}</td>
+                          <td>
+                            {opp.scrappy_present ? (
+                              <span className="badge badge--dim">{opp.scrappy_catalyst_direction ?? 'present'}</span>
+                            ) : (
+                              <span className="muted-text">No snapshot</span>
+                            )}
+                          </td>
+                          <td>
+                            <StateBadge label={reason} variant="default" />
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>

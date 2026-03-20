@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { createBrowserRouter, Navigate, Link } from 'react-router-dom';
 import { Layout } from './components/layout/Layout';
 import { CommandCenter } from './pages/CommandCenter';
 import { LiveSignalFeed } from './pages/LiveSignalFeed';
@@ -20,10 +20,21 @@ import { Assets } from './pages/Assets';
 import { ScannerSymbol } from './pages/ScannerSymbol';
 import { OrderDetail } from './pages/OrderDetail';
 
+function NotFound() {
+  return (
+    <div className="page-stack">
+      <h1 className="page-title">404 Not Found</h1>
+      <p className="muted-text">The page you're looking for doesn't exist.</p>
+      <Link to="/command">← Back to Command Center</Link>
+    </div>
+  );
+}
+
 export const router = createBrowserRouter([
   {
     path: '/',
     element: <Layout />,
+    errorElement: <NotFound />,
     children: [
       { index: true, element: <Navigate to="/command" replace /> },
       { path: 'overview', element: <CommandCenter /> },
@@ -46,6 +57,7 @@ export const router = createBrowserRouter([
       { path: 'calendar', element: <Calendar /> },
       { path: 'assets', element: <Assets /> },
       { path: 'scanner/symbol/:symbol', element: <ScannerSymbol /> },
+      { path: '*', element: <NotFound /> },
     ],
   },
 ]);
