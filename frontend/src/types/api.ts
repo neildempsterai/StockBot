@@ -110,6 +110,9 @@ export interface IntelligenceRecentResponse {
     stale_flag?: boolean;
     conflict_flag?: boolean;
     snapshot_ts?: string;
+    coverage_status?: 'fresh_research' | 'carried_forward_research' | 'low_evidence' | 'no_research';
+    coverage_reason?: string;
+    coverage_latest_evidence_ts?: string;
     [key: string]: unknown;
   }>;
 }
@@ -233,6 +236,12 @@ export interface ScrappyStatusResponse {
   last_snapshots_updated?: number;
   last_symbols_requested?: string[];
   last_symbols_researched?: string[];
+  coverage_counts?: {
+    fresh_research?: number;
+    carried_forward_research?: number;
+    low_evidence?: number;
+    no_research?: number;
+  };
   [key: string]: unknown;
 }
 

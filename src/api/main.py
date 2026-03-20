@@ -59,6 +59,7 @@ from stockbot.db.models import (
 from stockbot.db.session import get_session_factory
 from stockbot.ledger.store import LedgerStore
 from stockbot.scrappy.api import router as scrappy_router
+from stockbot.scrappy.snapshot import classify_coverage_status
 from stockbot.scrappy.store import (
     get_gate_rejection_counts,
     get_gate_rejection_counts_by_mode,
@@ -448,6 +449,20 @@ async def list_signals(
                 "scrappy_mode": getattr(s, "scrappy_mode", None),
                 "paper_order_id": getattr(s, "paper_order_id", None),
                 "execution_mode": getattr(s, "execution_mode", None),
+                # Opportunity attribution
+                "opportunity_run_id": getattr(s, "opportunity_run_id", None),
+                "opportunity_candidate_rank": getattr(s, "opportunity_candidate_rank", None),
+                "opportunity_candidate_source": getattr(s, "opportunity_candidate_source", None),
+                "opportunity_market_score": float(getattr(s, "opportunity_market_score", None)) if getattr(s, "opportunity_market_score", None) is not None else None,
+                "opportunity_semantic_score": float(getattr(s, "opportunity_semantic_score", None)) if getattr(s, "opportunity_semantic_score", None) is not None else None,
+                # Intelligence participation
+                "intelligence_snapshot_id": getattr(s, "intelligence_snapshot_id", None),
+                "ai_referee_assessment_id": getattr(s, "ai_referee_assessment_id", None),
+                # Price data at signal time
+                "bid": float(s.bid) if s.bid is not None else None,
+                "ask": float(s.ask) if s.ask is not None else None,
+                "last": float(s.last) if s.last is not None else None,
+                "spread_bps": s.spread_bps,
             }
             for s in signals
         ],
@@ -462,6 +477,9 @@ def _snapshot_to_dict(snap: SymbolIntelligenceSnapshot | None) -> dict | None:
     # catalyst_strength is int in DB; always serialize as string for frontend
     raw_strength = getattr(snap, "catalyst_strength", None)
     catalyst_strength: str | None = str(raw_strength) if raw_strength is not None else None
+    
+    # Classify coverage status
+    coverage = classify_coverage_status(snap)
     headline_set = getattr(snap, "headline_set_json", None) or []
     headline_count = len(headline_set) if isinstance(headline_set, list) else 0
     out = {
@@ -492,6 +510,10 @@ def _snapshot_to_scrappy_enrichment(snap: SymbolIntelligenceSnapshot | None) -> 
     catalyst_strength: str | None = str(raw_strength) if raw_strength is not None else None
     headline_set = getattr(snap, "headline_set_json", None) or []
     headline_count = len(headline_set) if isinstance(headline_set, list) else 0
+    
+    # Classify coverage status
+    coverage = classify_coverage_status(snap)
+    
     return {
         "latest_scrappy_snapshot_id": snap.id,
         "latest_scrappy_snapshot_ts": snap.snapshot_ts.isoformat() if snap.snapshot_ts else None,
@@ -502,6 +524,8 @@ def _snapshot_to_scrappy_enrichment(snap: SymbolIntelligenceSnapshot | None) -> 
         "scrappy_evidence_count": snap.evidence_count,
         "scrappy_source_count": snap.source_count,
         "scrappy_headline_count": headline_count,
+        "coverage_status": coverage.status,
+        "coverage_reason": coverage.reason,
     }
 
 
@@ -2359,6 +2383,33 @@ async def get_scrappy_status() -> dict:
     except Exception:
         pass
     
+    # Calculate coverage status counts for focus symbols
+    coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
+    try:
+        from stockbot.scrappy.snapshot import classify_coverage_status
+        import redis.asyncio as redis
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        scanner_top_json = await r.get("stockbot:scanner:top_symbols")
+        await r.aclose()
+        focus_symbols = []
+        if scanner_top_json:
+            try:
+                focus_symbols = json.loads(scanner_top_json)
+                if isinstance(focus_symbols, list):
+                    focus_symbols = [s.strip().upper() for s in focus_symbols if s][:20]
+            except Exception:
+                pass
+        
+        if focus_symbols:
+            async with factory() as session:
+                for sym in focus_symbols:
+                    snap = await get_latest_snapshot_by_symbol(session, sym)
+                    coverage = classify_coverage_status(snap)
+                    if coverage.status in coverage_counts:
+                        coverage_counts[coverage.status] += 1
+    except Exception:
+        pass
+    
     return {
         "scrappy_auto_enabled": auto_enabled,
         "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
@@ -2371,6 +2422,130 @@ async def get_scrappy_status() -> dict:
         "last_symbols_requested": last_symbols_requested,
         "last_symbols_researched": last_symbols_researched,
         "watchlist_size": len(watchlist) if watchlist else 0,
+        "coverage_counts": coverage_counts,
+    }
+
+
+@app.get("/v1/premarket/status")
+async def get_premarket_status() -> dict:
+    """Comprehensive premarket status: scanner, opportunities, Scrappy coverage, AI Referee, overall state."""
+    from datetime import UTC, datetime
+    from stockbot.config import get_settings
+    from stockbot.market_sessions import current_session, is_premarket
+    from stockbot.scrappy.snapshot import classify_coverage_status
+    import redis.asyncio as redis
+    import json
+    
+    settings = get_settings()
+    session_label = current_session()
+    
+    # Get focus symbols from scanner/opportunities
+    focus_symbols = []
+    scanner_live = False
+    opportunities_count = 0
+    try:
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        scanner_top_json = await r.get("stockbot:scanner:top_symbols")
+        scanner_top_ts = await r.get("stockbot:scanner:top_ts")
+        await r.aclose()
+        if scanner_top_json:
+            try:
+                focus_symbols = json.loads(scanner_top_json)
+                if isinstance(focus_symbols, list):
+                    focus_symbols = [s.strip().upper() for s in focus_symbols if s]
+            except Exception:
+                pass
+        if scanner_top_ts:
+            scanner_live = True
+    except Exception:
+        pass
+    
+    # Get opportunities count
+    try:
+        from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+        _, _, candidates = await get_latest_opportunity_run_and_candidates()
+        if candidates:
+            opportunities_count = len(candidates)
+    except Exception:
+        pass
+    
+    # Get Scrappy status
+    scrappy_status = await get_scrappy_status()
+    
+    # Classify coverage for all focus symbols
+    coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
+    coverage_details: list[dict] = []
+    factory = get_session_factory()
+    async with factory() as session:
+        for sym in focus_symbols[:20]:
+            snap = await get_latest_snapshot_by_symbol(session, sym)
+            coverage = classify_coverage_status(snap)
+            if coverage.status in coverage_counts:
+                coverage_counts[coverage.status] += 1
+            coverage_details.append({
+                "symbol": sym,
+                "coverage_status": coverage.status,
+                "coverage_reason": coverage.reason,
+                "evidence_count": coverage.evidence_count,
+                "freshness_minutes": coverage.freshness_minutes,
+            })
+    
+    # Get AI Referee premarket status
+    ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
+    ai_referee_last_run = None
+    ai_referee_assessed = 0
+    ai_referee_skipped = 0
+    try:
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        ai_referee_last_run = await r.get("stockbot:ai_referee_premarket:last_run_ts")
+        await r.aclose()
+        # Count recent assessments
+        from stockbot.ai_referee.store import list_recent_assessments
+        async with factory() as session:
+            recent = await list_recent_assessments(session, limit=100)
+            ai_referee_assessed = len([a for a in recent if a.assessment_ts and (datetime.now(UTC) - a.assessment_ts.replace(tzinfo=UTC)).total_seconds() < 3600 * 4])
+    except Exception:
+        pass
+    
+    # Determine overall premarket state
+    overall_state = "not_running"
+    if scanner_live and opportunities_count > 0:
+        if coverage_counts["fresh_research"] > 0 or coverage_counts["carried_forward_research"] > 0:
+            overall_state = "alive"
+        elif coverage_counts["low_evidence"] > 0 or coverage_counts["no_research"] > 0:
+            overall_state = "degraded"
+        else:
+            overall_state = "partial"
+    elif scanner_live:
+        overall_state = "partial"
+    
+    return {
+        "session": session_label,
+        "is_premarket": is_premarket(),
+        "overall_state": overall_state,
+        "scanner": {
+            "live": scanner_live,
+            "focus_symbols_count": len(focus_symbols),
+            "focus_symbols": focus_symbols[:20],
+        },
+        "opportunities": {
+            "count": opportunities_count,
+        },
+        "scrappy": {
+            "auto_enabled": scrappy_status.get("scrappy_auto_enabled"),
+            "last_run_at": scrappy_status.get("last_run_at"),
+            "last_attempt_at": scrappy_status.get("last_attempt_at"),
+            "last_failure_reason": scrappy_status.get("last_failure_reason"),
+            "last_notes_created": scrappy_status.get("last_notes_created"),
+            "last_snapshots_updated": scrappy_status.get("last_snapshots_updated"),
+            "coverage_counts": coverage_counts,
+        },
+        "ai_referee": {
+            "enabled": ai_referee_enabled,
+            "last_run_at": ai_referee_last_run,
+            "assessed_count_recent": ai_referee_assessed,
+        },
+        "coverage_details": coverage_details,
     }
 
 

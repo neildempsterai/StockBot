@@ -131,11 +131,39 @@ except:
 "
 warn "Scrappy has recent attempt" [ -n "$scrappy_last_attempt" ]
 check "Scrappy has no recent failure" [ -z "$scrappy_failure" ]
-warn "Scrappy updated snapshots" [ "$scrappy_snapshots" -gt 0 ]
+# Check that snapshots are refreshed even when no new URLs (quiet morning behavior)
+scrappy_outcome=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('last_outcome', ''))" 2>/dev/null || echo "")
+if [ "$scrappy_outcome" = "no_new_candidate_urls" ]; then
+  warn "Scrappy refreshed snapshots even with no_new_candidate_urls" [ "$scrappy_snapshots" -gt 0 ]
+else
+  warn "Scrappy updated snapshots" [ "$scrappy_snapshots" -gt 0 ]
+fi
 
-# ---- 3. AI Coverage State Correct ----
-echo "=== 3. AI Coverage State Correct ==="
+# ---- 3. Coverage Status and AI Coverage State Correct ----
+echo "=== 3. Coverage Status and AI Coverage State Correct ==="
 echo
+
+# Check coverage status counts from scrappy status
+scrappy_coverage_fresh=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); counts=d.get('coverage_counts', {}); print(counts.get('fresh_research', 0))" 2>/dev/null || echo "0")
+scrappy_coverage_carried=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); counts=d.get('coverage_counts', {}); print(counts.get('carried_forward_research', 0))" 2>/dev/null || echo "0")
+scrappy_coverage_low=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); counts=d.get('coverage_counts', {}); print(counts.get('low_evidence', 0))" 2>/dev/null || echo "0")
+scrappy_coverage_none=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); counts=d.get('coverage_counts', {}); print(counts.get('no_research', 0))" 2>/dev/null || echo "0")
+
+check "Coverage status counts are available" [ -n "$scrappy_coverage_fresh" ]
+warn "Some symbols have fresh or carried-forward research" python3 -c "
+import sys
+fresh = int('$scrappy_coverage_fresh')
+carried = int('$scrappy_coverage_carried')
+sys.exit(0 if (fresh + carried) > 0 else 1)
+"
+
+# Check premarket status endpoint
+premarket_status=$(get "/v1/premarket/status")
+premarket_overall=$(echo "$premarket_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('overall_state', 'unknown'))" 2>/dev/null || echo "unknown")
+premarket_scanner_live=$(echo "$premarket_status" | python3 -c "import sys, json; d=json.load(sys.stdin); scanner=d.get('scrappy', {}); print(d.get('scanner', {}).get('live', False))" 2>/dev/null || echo "False")
+
+check "Premarket status endpoint exists" [ -n "$premarket_overall" ]
+check "Premarket status shows overall state" [ "$premarket_overall" != "unknown" ]
 
 runtime_status=$(get "/v1/runtime/status")
 ai_referee_enabled=$(echo "$runtime_status" | python3 -c "import sys, json; d=json.load(sys.stdin); ai=d.get('ai_referee', {}); print(ai.get('enabled', False))" 2>/dev/null || echo "False")
@@ -146,7 +174,20 @@ ai_assessment_count=$(echo "$ai_referee_recent" | python3 -c "import sys, json; 
 
 check "AI Referee status is available" [ -n "$ai_referee_enabled" ]
 if [ "$ai_referee_enabled" = "True" ]; then
-  warn "AI Referee has recent assessments" [ "$ai_assessment_count" -gt 0 ]
+  warn "AI Referee has recent assessments or explicit skip reasons" python3 -c "
+import sys, json
+# Check if AI Referee premarket runner has run and provided status
+premarket_ai = '$premarket_status'
+try:
+    d = json.loads(premarket_ai)
+    ai = d.get('ai_referee', {})
+    assessed = ai.get('assessed_count_recent', 0)
+    last_run = ai.get('last_run_at')
+    # If enabled, should have either assessments or a recent run with skip reasons
+    sys.exit(0 if (assessed > 0 or last_run) else 1)
+except:
+    sys.exit(1)
+"
 else
   echo "INFO: AI Referee is disabled (not required for premarket)"
   PASS=$((PASS + 1))

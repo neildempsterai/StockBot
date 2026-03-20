@@ -356,14 +356,38 @@ export function IntelligenceCenter() {
               value={focusSymbols.length}
             />
             <KPICard
-              title="With Fresh Research"
-              value={focusWithFreshIntelligence}
-              valueClass={focusWithFreshIntelligence > 0 ? 'pnl--positive' : ''}
+              title="Fresh Research"
+              value={focusSymbols.filter((o) => {
+                const sym = o.symbol?.toUpperCase();
+                const snap = snapshotMap.get(sym);
+                return snap?.coverage_status === 'fresh_research';
+              }).length}
+              valueClass={focusSymbols.filter((o) => {
+                const sym = o.symbol?.toUpperCase();
+                const snap = snapshotMap.get(sym);
+                return snap?.coverage_status === 'fresh_research';
+              }).length > 0 ? 'pnl--positive' : ''}
+            />
+            <KPICard
+              title="Carried Forward"
+              value={focusSymbols.filter((o) => {
+                const sym = o.symbol?.toUpperCase();
+                const snap = snapshotMap.get(sym);
+                return snap?.coverage_status === 'carried_forward_research';
+              }).length}
             />
             <KPICard
               title="Needing Research"
-              value={focusMissingIntelligence}
-              valueClass={focusMissingIntelligence > 0 ? 'pnl--negative' : ''}
+              value={focusSymbols.filter((o) => {
+                const sym = o.symbol?.toUpperCase();
+                const snap = snapshotMap.get(sym);
+                return snap?.coverage_status === 'no_research' || snap?.coverage_status === 'low_evidence' || !snap;
+              }).length}
+              valueClass={focusSymbols.filter((o) => {
+                const sym = o.symbol?.toUpperCase();
+                const snap = snapshotMap.get(sym);
+                return snap?.coverage_status === 'no_research' || snap?.coverage_status === 'low_evidence' || !snap;
+              }).length > 0 ? 'pnl--negative' : ''}
             />
             <KPICard
               title="Assessed by AI"
@@ -461,39 +485,45 @@ export function IntelligenceCenter() {
                   );
                   const hasOpenPosition = symbolsWithOpenPositions.has(symbolUpper);
                   const hasIntelligence = snapshot != null;
-                  const hasFreshIntelligence = snapshot && !snapshot.stale_flag && !snapshot.conflict_flag;
-                  const hasStaleIntelligence = snapshot?.stale_flag;
-                  const hasConflictedIntelligence = snapshot?.conflict_flag;
+                  const coverageStatus = snapshot?.coverage_status || (hasIntelligence ? 'low_evidence' : 'no_research');
+                  const coverageReason = snapshot?.coverage_reason || '';
+                  const hasFreshResearch = coverageStatus === 'fresh_research';
+                  const hasCarriedForwardResearch = coverageStatus === 'carried_forward_research';
+                  const hasLowEvidence = coverageStatus === 'low_evidence';
+                  const hasNoResearch = coverageStatus === 'no_research';
                   const hasAiAssessment = aiAssessment != null;
 
-                  // Determine pipeline stage with explicit reasoning
+                  // Determine pipeline stage with explicit reasoning using coverage status
                   let pipelineStage = 'discovered';
                   let stageReason = '';
                   
                   if (hasOpenPosition) {
                     pipelineStage = 'active';
                     stageReason = 'Open paper position exists';
-                  } else if (!hasIntelligence) {
+                  } else if (hasNoResearch) {
                     pipelineStage = 'missing';
-                    stageReason = 'No Scrappy snapshot - needs research';
-                  } else if (hasStaleIntelligence) {
-                    pipelineStage = 'stale';
-                    stageReason = 'Snapshot stale - research outdated';
-                  } else if (hasConflictedIntelligence) {
-                    pipelineStage = 'stale';
-                    stageReason = 'Snapshot conflicted - mixed signals';
-                  } else if (!hasAiAssessment && runtimeStatus?.ai_referee?.enabled) {
-                    pipelineStage = 'researched';
-                    stageReason = 'Research complete, awaiting AI assessment';
-                  } else if (hasFreshIntelligence && hasAiAssessment) {
-                    pipelineStage = 'ready';
-                    stageReason = 'Research fresh, AI assessed';
-                  } else if (hasIntelligence && !hasStaleIntelligence && !hasConflictedIntelligence) {
+                    stageReason = coverageReason || 'No research coverage - needs research';
+                  } else if (hasLowEvidence) {
+                    pipelineStage = 'blocked';
+                    stageReason = coverageReason || 'Low evidence - insufficient research support';
+                  } else if (hasCarriedForwardResearch && !hasAiAssessment && runtimeStatus?.ai_referee?.enabled) {
                     pipelineStage = 'watch';
-                    stageReason = 'Research fresh, no AI assessment yet';
+                    stageReason = coverageReason || 'Carried-forward research, awaiting AI assessment';
+                  } else if (hasCarriedForwardResearch && hasAiAssessment) {
+                    pipelineStage = 'watch';
+                    stageReason = 'Carried-forward research, AI assessed';
+                  } else if (hasFreshResearch && !hasAiAssessment && runtimeStatus?.ai_referee?.enabled) {
+                    pipelineStage = 'researched';
+                    stageReason = 'Fresh research complete, awaiting AI assessment';
+                  } else if (hasFreshResearch && hasAiAssessment) {
+                    pipelineStage = 'ready';
+                    stageReason = 'Fresh research, AI assessed';
+                  } else if (hasFreshResearch) {
+                    pipelineStage = 'watch';
+                    stageReason = 'Fresh research, no AI assessment yet';
                   } else {
                     pipelineStage = 'blocked';
-                    stageReason = 'Unknown state';
+                    stageReason = coverageReason || 'Unknown state';
                   }
                   
                   // Use pipelineStage for readinessStatus display
@@ -527,8 +557,10 @@ export function IntelligenceCenter() {
                             </div>
                             <div style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
                               {snapshot?.evidence_count ?? 0} evidence
-                              {hasStaleIntelligence && <span className="flag-badge flag-badge--warn"> stale</span>}
-                              {hasConflictedIntelligence && <span className="flag-badge flag-badge--warn"> conflict</span>}
+                              {coverageStatus === 'fresh_research' && <span className="flag-badge flag-badge--success" style={{ marginLeft: '0.25rem' }}> fresh</span>}
+                              {coverageStatus === 'carried_forward_research' && <span className="flag-badge flag-badge--warn" style={{ marginLeft: '0.25rem' }}> carried</span>}
+                              {coverageStatus === 'low_evidence' && <span className="flag-badge flag-badge--warn" style={{ marginLeft: '0.25rem' }}> low</span>}
+                              {coverageStatus === 'no_research' && <span className="flag-badge flag-badge--error" style={{ marginLeft: '0.25rem' }}> none</span>}
                             </div>
                           </div>
                         ) : (

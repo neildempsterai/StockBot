@@ -131,6 +131,7 @@ services:
     env_file: [ "../.env" ]
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -142,6 +143,7 @@ services:
     env_file: [ "../.env" ]
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

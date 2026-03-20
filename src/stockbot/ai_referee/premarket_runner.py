@@ -16,6 +16,7 @@ from stockbot.market_sessions import is_premarket
 from stockbot.ai_referee.service import assess_setup
 from stockbot.ai_referee.store import insert_assessment, get_latest_assessment_for_symbol
 from stockbot.ai_referee.types import RefereeInput
+from stockbot.scrappy.snapshot import classify_coverage_status
 from stockbot.scrappy.store import get_recent_notes, get_latest_snapshot_by_symbol
 from stockbot.strategies.intra_event_momo import STRATEGY_ID, STRATEGY_VERSION
 
@@ -26,8 +27,8 @@ REDIS_KEY_AI_REFEREE_PREMARKET_LAST_SYMBOLS = "stockbot:ai_referee_premarket:las
 REDIS_KEY_SCANNER_TOP = "stockbot:scanner:top_symbols"
 REDIS_TTL_LAST_RUN_SEC = 86400
 
-# Only assess symbols with fresh snapshots (not stale, not conflicted, < 4 hours old)
-MAX_SNAPSHOT_AGE_HOURS = 4
+# Only assess symbols with fresh or carried-forward research
+# Skip no_research and low_evidence
 
 
 async def _get_focus_symbols() -> list[str]:
@@ -48,7 +49,7 @@ async def _get_focus_symbols() -> list[str]:
 
 
 async def _should_assess_symbol(symbol: str, snapshot_id: int | None) -> tuple[bool, str]:
-    """Check if symbol should be assessed: has fresh snapshot, not recently assessed."""
+    """Check if symbol should be assessed: has fresh or carried-forward research, not recently assessed."""
     if not snapshot_id:
         return False, "no_snapshot"
     
@@ -61,17 +62,18 @@ async def _should_assess_symbol(symbol: str, snapshot_id: int | None) -> tuple[b
         if not snapshot:
             return False, "snapshot_not_found"
         
-        # Check freshness
-        if snapshot.stale_flag:
-            return False, "snapshot_stale"
-        if snapshot.conflict_flag:
-            return False, "snapshot_conflicted"
+        # Classify coverage status
+        coverage = classify_coverage_status(snapshot)
         
-        # Check age
-        if snapshot.snapshot_ts:
-            age_hours = (datetime.now(UTC) - snapshot.snapshot_ts.replace(tzinfo=UTC)).total_seconds() / 3600
-            if age_hours > MAX_SNAPSHOT_AGE_HOURS:
-                return False, f"snapshot_too_old_{age_hours:.1f}h"
+        # Only assess fresh_research or carried_forward_research
+        if coverage.status == "no_research":
+            return False, f"no_research_{coverage.reason}"
+        if coverage.status == "low_evidence":
+            return False, f"low_evidence_{coverage.reason}"
+        
+        # Allow fresh_research and carried_forward_research
+        if coverage.status not in ("fresh_research", "carried_forward_research"):
+            return False, f"coverage_status_{coverage.status}_{coverage.reason}"
         
         # Check if recently assessed (skip if assessed < 2 hours ago)
         existing = await get_latest_assessment_for_symbol(session, symbol, STRATEGY_ID)
@@ -80,7 +82,7 @@ async def _should_assess_symbol(symbol: str, snapshot_id: int | None) -> tuple[b
             if age_hours < 2:
                 return False, f"recently_assessed_{age_hours:.1f}h"
         
-        return True, "ok"
+        return True, f"ok_{coverage.status}"
 
 
 async def _assess_symbol_premarket(symbol: str, snapshot_id: int) -> bool:

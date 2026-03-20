@@ -123,6 +123,24 @@ async def run_scrappy(
             candidates = collect_candidates_from_sources(symbols=symbols, themes=themes)
             candidate_count = len(candidates)
             if candidate_count == 0:
+                # Even with no new candidates, refresh snapshots from existing notes for focus symbols
+                # This keeps premarket prep alive on quiet mornings
+                snapshots_updated = 0
+                for sym in (run_scope.get("symbols") or []):
+                    if not sym or not isinstance(sym, str):
+                        continue
+                    try:
+                        notes = await get_recent_notes(
+                            session, symbol=sym.strip().upper()[:32], limit=50
+                        )
+                        snap = build_snapshot_from_notes(
+                            sym.strip().upper()[:32], notes, scrappy_run_id=run_id
+                        )
+                        await insert_intelligence_snapshot_from_snapshot(session, snap)
+                        snapshots_updated += 1
+                    except Exception as e:
+                        logger.warning("snapshot_refresh_failed symbol=%s run_id=%s error=%s", sym, run_id, e)
+                
                 await finish_scrappy_run(
                     session, run_id, OUTCOME_NO_CANDIDATES,
                     post_dedup_count=0, notes_created=0,
@@ -135,6 +153,7 @@ async def run_scrappy(
                     "candidate_url_count": 0,
                     "post_dedup_count": 0,
                     "notes_created": 0,
+                    "snapshots_updated": snapshots_updated,
                     "outcome_code": OUTCOME_NO_CANDIDATES,
                 }
 

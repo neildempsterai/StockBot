@@ -7,7 +7,8 @@ import { BackendNotConnected } from '../components/shared/BackendNotConnected';
 import { EmptyState } from '../components/shared/EmptyState';
 import { SectionHeader } from '../components/shared/SectionHeader';
 import { StateBadge } from '../components/shared/StateBadge';
-import { formatTs } from '../utils/format';
+import { IntelligenceBadge } from '../components/shared/IntelligenceBadge';
+import { formatTs, formatPrice } from '../utils/format';
 import type { PaperExposureResponse } from '../types/api';
 
 interface SignalRow {
@@ -20,6 +21,18 @@ interface SignalRow {
   strategy_version?: string;
   reason_codes?: string[];
   paper_order_id?: string;
+  execution_mode?: string;
+  scrappy_mode?: string;
+  opportunity_candidate_rank?: number;
+  opportunity_candidate_source?: string;
+  opportunity_market_score?: number;
+  opportunity_semantic_score?: number;
+  intelligence_snapshot_id?: number;
+  ai_referee_assessment_id?: number;
+  bid?: number;
+  ask?: number;
+  last?: number;
+  spread_bps?: number;
 }
 
 export function LiveSignalFeed() {
@@ -75,7 +88,10 @@ export function LiveSignalFeed() {
                 <th>Qty</th>
                 <th>Time</th>
                 <th>Strategy</th>
+                <th>Opportunity</th>
+                <th>Intelligence</th>
                 <th>Reasons</th>
+                <th>Price</th>
                 <th>Status</th>
                 <th></th>
               </tr>
@@ -84,6 +100,7 @@ export function LiveSignalFeed() {
               {signals.map((s) => {
                 const hasOpenPosition = openPaperSignalUuids.has(s.signal_uuid);
                 const hasPaperOrder = !!s.paper_order_id;
+                const executionMode = s.execution_mode || 'shadow';
                 return (
                   <tr 
                     key={s.signal_uuid}
@@ -97,18 +114,83 @@ export function LiveSignalFeed() {
                     </td>
                     <td>{s.qty}</td>
                     <td className="cell--ts">{formatTs(s.quote_ts)}</td>
-                    <td>{s.strategy_id ?? '—'}</td>
-                    <td className="cell--muted cell--small">{(s.reason_codes ?? []).slice(0, 2).join(', ')}</td>
                     <td>
-                      {hasOpenPosition && (
-                        <StateBadge label="Open Position" variant="success" />
+                      <div>{s.strategy_id ?? '—'}</div>
+                      {s.strategy_version && (
+                        <div className="muted-text" style={{ fontSize: '0.75rem' }}>v{s.strategy_version}</div>
                       )}
-                      {!hasOpenPosition && hasPaperOrder && (
-                        <StateBadge label="Order Filled" variant="default" />
+                    </td>
+                    <td className="cell--muted cell--small">
+                      {s.opportunity_candidate_rank ? (
+                        <div>
+                          <div>Rank: {s.opportunity_candidate_rank}</div>
+                          {s.opportunity_candidate_source && (
+                            <div style={{ fontSize: '0.7rem', marginTop: '0.25rem' }}>
+                              {s.opportunity_candidate_source}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        '—'
                       )}
-                      {!hasOpenPosition && !hasPaperOrder && (
-                        <span className="muted-text">—</span>
+                    </td>
+                    <td>
+                      <IntelligenceBadge
+                        scrappy={s.intelligence_snapshot_id ? { present: true } : false}
+                        aiReferee={s.ai_referee_assessment_id ? { ran: true } : false}
+                        compact
+                      />
+                      {s.scrappy_mode && (
+                        <div className="muted-text" style={{ fontSize: '0.7rem', marginTop: '0.25rem' }}>
+                          {s.scrappy_mode}
+                        </div>
                       )}
+                    </td>
+                    <td className="cell--muted cell--small">
+                      {(s.reason_codes ?? []).length > 0 ? (
+                        <div>
+                          {(s.reason_codes ?? []).slice(0, 3).join(', ')}
+                          {(s.reason_codes ?? []).length > 3 && (
+                            <span className="muted-text" style={{ fontSize: '0.7rem' }}>
+                              {' '}+{(s.reason_codes ?? []).length - 3} more
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className="cell--muted cell--small">
+                      {s.last ? (
+                        <div>
+                          <div>{formatPrice(s.last)}</div>
+                          {s.spread_bps != null && (
+                            <div style={{ fontSize: '0.7rem' }}>
+                              {s.spread_bps > 0 ? '+' : ''}{(s.spread_bps / 100).toFixed(2)}%
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>
+                      <div>
+                        {hasOpenPosition && (
+                          <StateBadge label="Open Position" variant="success" />
+                        )}
+                        {!hasOpenPosition && hasPaperOrder && (
+                          <StateBadge label="Order Filled" variant="default" />
+                        )}
+                        {!hasOpenPosition && !hasPaperOrder && (
+                          <span className="muted-text">—</span>
+                        )}
+                      </div>
+                      <div style={{ marginTop: '0.25rem' }}>
+                        <span className="muted-text" style={{ fontSize: '0.7rem' }}>
+                          {executionMode}
+                        </span>
+                      </div>
                     </td>
                     <td>
                       <Link to={`/signals/${s.signal_uuid}`} className="link-mono">Detail</Link>

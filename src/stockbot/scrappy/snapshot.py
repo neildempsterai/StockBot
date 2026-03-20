@@ -1,7 +1,8 @@
 """Build symbol-scoped intelligence snapshots from Scrappy notes. Deterministic scoring; no trade instructions."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from stockbot.scrappy.types import (
@@ -29,6 +30,11 @@ DEFAULT_DIRECTION = CATALYST_DIRECTION_NEUTRAL
 DEFAULT_STRENGTH = 0
 STALE_MINUTES = 120  # snapshot older than this -> stale_flag True
 CONFLICT_THRESHOLD = 2  # if both positive and negative notes above this -> conflicting
+
+# Coverage status thresholds (deterministic)
+FRESH_THRESHOLD_MINUTES = 4 * 60  # 4 hours
+CARRIED_FORWARD_THRESHOLD_MINUTES = 24 * 60  # 24 hours
+LOW_EVIDENCE_THRESHOLD = 2  # evidence_count below this -> low_evidence
 
 
 def build_snapshot_from_notes(
@@ -152,4 +158,160 @@ def build_snapshot_from_notes(
         raw_evidence_refs=evidence_refs,
         scrappy_run_id=scrappy_run_id,
         scrappy_version=SCRAPPY_VERSION,
+    )
+
+
+@dataclass
+class CoverageStatus:
+    """Coverage status classification for a symbol."""
+    status: str  # fresh_research | carried_forward_research | low_evidence | no_research
+    reason: str  # Human-readable explanation
+    latest_evidence_ts: datetime | None  # Timestamp of oldest note used (evidence age)
+    snapshot_ts: datetime | None  # When snapshot was generated
+    evidence_count: int
+    freshness_minutes: int
+
+
+def classify_coverage_status(
+    snapshot: SymbolIntelligenceSnapshot | None,
+    snapshot_ts: datetime | None = None,
+    *,
+    fresh_threshold_minutes: int = FRESH_THRESHOLD_MINUTES,
+    carried_forward_threshold_minutes: int = CARRIED_FORWARD_THRESHOLD_MINUTES,
+    low_evidence_threshold: int = LOW_EVIDENCE_THRESHOLD,
+) -> CoverageStatus:
+    """
+    Classify symbol coverage status deterministically.
+    
+    Rules:
+    - fresh_research: evidence exists, latest evidence < 4h old, not stale, not conflicted
+    - carried_forward_research: evidence exists, latest evidence 4-24h old, still usable
+    - low_evidence: some context but evidence_count < 2 or very sparse
+    - no_research: no usable evidence exists
+    
+    Freshness is tied to evidence age (freshness_minutes), not snapshot write time.
+    """
+    now = snapshot_ts or datetime.now(UTC)
+    
+    if not snapshot:
+        return CoverageStatus(
+            status="no_research",
+            reason="no_snapshot_exists",
+            latest_evidence_ts=None,
+            snapshot_ts=None,
+            evidence_count=0,
+            freshness_minutes=0,
+        )
+    
+    evidence_count = snapshot.evidence_count or 0
+    freshness_minutes = snapshot.freshness_minutes or 0
+    stale_flag = snapshot.stale_flag or False
+    conflict_flag = snapshot.conflict_flag or False
+    
+    # Calculate latest evidence timestamp from freshness_minutes
+    latest_evidence_ts = None
+    if snapshot.snapshot_ts and freshness_minutes > 0:
+        latest_evidence_ts = snapshot.snapshot_ts - timedelta(minutes=freshness_minutes)
+    
+    # no_research: no evidence at all
+    if evidence_count == 0:
+        return CoverageStatus(
+            status="no_research",
+            reason="no_notes_found_for_symbol",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=0,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # low_evidence: sparse evidence
+    if evidence_count < low_evidence_threshold:
+        return CoverageStatus(
+            status="low_evidence",
+            reason=f"metadata_only_or_sparse_evidence_count_{evidence_count}",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=evidence_count,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # Check freshness thresholds
+    is_fresh = freshness_minutes < fresh_threshold_minutes
+    is_carried_forward = (
+        freshness_minutes >= fresh_threshold_minutes and
+        freshness_minutes < carried_forward_threshold_minutes
+    )
+    
+    # fresh_research: recent evidence, not stale, not conflicted
+    if is_fresh and not stale_flag and not conflict_flag:
+        return CoverageStatus(
+            status="fresh_research",
+            reason=f"fresh_notes_within_{fresh_threshold_minutes // 60}h",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=evidence_count,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # carried_forward_research: older but still usable evidence
+    if is_carried_forward and not stale_flag:
+        return CoverageStatus(
+            status="carried_forward_research",
+            reason=f"no_new_urls_this_cycle_carrying_forward_evidence_from_{freshness_minutes // 60}h_ago",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=evidence_count,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # If stale or conflicted, classify based on age
+    if stale_flag:
+        if freshness_minutes < carried_forward_threshold_minutes:
+            return CoverageStatus(
+                status="carried_forward_research",
+                reason=f"stale_flag_set_but_within_carry_forward_window_{freshness_minutes // 60}h_old",
+                latest_evidence_ts=latest_evidence_ts,
+                snapshot_ts=snapshot.snapshot_ts,
+                evidence_count=evidence_count,
+                freshness_minutes=freshness_minutes,
+            )
+        else:
+            return CoverageStatus(
+                status="low_evidence",
+                reason=f"snapshot_stale_{freshness_minutes // 60}h_old",
+                latest_evidence_ts=latest_evidence_ts,
+                snapshot_ts=snapshot.snapshot_ts,
+                evidence_count=evidence_count,
+                freshness_minutes=freshness_minutes,
+            )
+    
+    if conflict_flag:
+        return CoverageStatus(
+            status="low_evidence",
+            reason="conflicting_evidence_directions",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=evidence_count,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # Fallback: older than carried-forward but has evidence
+    if freshness_minutes >= carried_forward_threshold_minutes:
+        return CoverageStatus(
+            status="low_evidence",
+            reason=f"evidence_too_old_{freshness_minutes // 60}h",
+            latest_evidence_ts=latest_evidence_ts,
+            snapshot_ts=snapshot.snapshot_ts,
+            evidence_count=evidence_count,
+            freshness_minutes=freshness_minutes,
+        )
+    
+    # Default fallback
+    return CoverageStatus(
+        status="low_evidence",
+        reason="unknown_coverage_state",
+        latest_evidence_ts=latest_evidence_ts,
+        snapshot_ts=snapshot.snapshot_ts,
+        evidence_count=evidence_count,
+        freshness_minutes=freshness_minutes,
     )
