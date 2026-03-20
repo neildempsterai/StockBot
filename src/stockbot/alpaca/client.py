@@ -377,7 +377,7 @@ class AlpacaClient:
                 self._url("/v2/orders"),
                 params=params,
                 headers=self._headers(),
-                timeout=10.0,
+                timeout=30.0,  # Increased from 10.0 to handle slow responses
             )
             r.raise_for_status()
             return r.json()

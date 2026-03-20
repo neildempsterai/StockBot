@@ -17,6 +17,8 @@ import { Orders } from './pages/Orders';
 import { Activities } from './pages/Activities';
 import { Calendar } from './pages/Calendar';
 import { Assets } from './pages/Assets';
+import { ScannerSymbol } from './pages/ScannerSymbol';
+import { OrderDetail } from './pages/OrderDetail';
 
 export const router = createBrowserRouter([
   {
@@ -39,9 +41,11 @@ export const router = createBrowserRouter([
       { path: 'history', element: <History /> },
       { path: 'settings', element: <Settings /> },
       { path: 'orders', element: <Orders /> },
+      { path: 'orders/:orderId', element: <OrderDetail /> },
       { path: 'activities', element: <Activities /> },
       { path: 'calendar', element: <Calendar /> },
       { path: 'assets', element: <Assets /> },
+      { path: 'scanner/symbol/:symbol', element: <ScannerSymbol /> },
     ],
   },
 ]);
