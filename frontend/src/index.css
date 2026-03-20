@@ -11,6 +11,23 @@
   --error: #f85149;
   --paper: #388bfd;
   --shadow: #a371f7;
+
+  /* Semantic aliases used by components in inline styles */
+  --color-bg: var(--bg);
+  --color-bg-secondary: #161b22;
+  --color-bg-tertiary: #21262d;
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-info: var(--accent);
+  --color-success-bg: rgba(63, 185, 80, 0.08);
+  --color-warning-bg: rgba(210, 153, 34, 0.08);
+  --color-error-bg: rgba(248, 81, 73, 0.08);
 }
 
 * {
@@ -502,8 +519,10 @@ tr:hover { background: rgba(255,255,255,0.02); }
   border-radius: 3px;
   font-size: 10px;
 }
-.flag-badge--ok   { background: rgba(63, 185, 80, 0.15); color: var(--success); }
-.flag-badge--warn { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+.flag-badge--ok      { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+.flag-badge--success { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+.flag-badge--warn    { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+.flag-badge--error   { background: rgba(248, 81, 73, 0.15); color: var(--error); }
 .catalyst-badge {
   display: inline-block;
   padding: 0.15rem 0.4rem;
@@ -671,3 +690,59 @@ tr:hover { background: rgba(255,255,255,0.02); }
 
 /* ── empty-state msg alias */
 .empty-state__msg { font-size: 13px; color: var(--text-muted); }
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  font-family: inherit;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn--primary {
+  background: var(--accent);
+  color: #000;
+  border-color: var(--accent);
+}
+.btn--primary:hover:not(:disabled) { opacity: 0.85; }
+.btn--secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+.btn--secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn--danger {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--error);
+  border-color: rgba(248, 81, 73, 0.3);
+}
+.btn--danger:hover:not(:disabled) { background: rgba(248, 81, 73, 0.25); }
+
+/* ── Responsive breakpoints ──────────────────────────────────── */
+@media (max-width: 1200px) {
+  .grid-cards--5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .grid-cards--5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-cards--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-cards--3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sidebar { width: 180px; min-width: 180px; }
+}
+@media (max-width: 640px) {
+  .grid-cards--5,
+  .grid-cards--4,
+  .grid-cards--3 { grid-template-columns: 1fr; }
+  .sidebar { width: 160px; min-width: 160px; }
+  .layout__main { padding: 0.75rem; }
+  .topbar__badges { display: none; }
+}

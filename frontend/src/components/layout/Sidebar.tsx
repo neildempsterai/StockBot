@@ -1,4 +1,8 @@
 import { NavLink } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { apiGet } from '../../api/client';
+import { ENDPOINTS } from '../../api/endpoints';
+import type { RuntimeStatusResponse } from '../../types/api';
 
 interface NavItem {
   to: string;
@@ -22,11 +26,19 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/experiments', label: 'Mode Analysis', icon: '🔬' },
   { to: '/system-health', label: 'System Health', icon: '❤️', section: 'System' },
   { to: '/strategy-lab', label: 'Strategy Lab', icon: '🧪' },
-  { to: '/history', label: 'History', icon: '📋' },
-  { to: '/settings', label: 'Settings', icon: '⚙️' },
+  { to: '/settings', label: 'Settings', icon: '⚙️', section: 'Config' },
 ];
 
 export function Sidebar() {
+  const { data: runtimeStatus } = useQuery({
+    queryKey: ['runtimeStatus'],
+    queryFn: () => apiGet<RuntimeStatusResponse>(ENDPOINTS.runtimeStatus),
+    refetchInterval: 30_000,
+  });
+
+  const executionMode = runtimeStatus?.strategy?.execution_mode ?? 'shadow';
+  const paperArmed = runtimeStatus?.paper_trading_armed ?? false;
+
   let lastSection = '';
   return (
     <aside className="sidebar">
@@ -54,7 +66,16 @@ export function Sidebar() {
           );
         })}
       </nav>
-      <div className="sidebar__footer">StockBot v0.1 · shadow mode</div>
+      <div className="sidebar__footer">
+        <div>StockBot v0.1</div>
+        <div style={{
+          marginTop: '0.25rem',
+          color: paperArmed ? 'var(--success)' : 'var(--error)',
+          fontWeight: 600,
+        }}>
+          {executionMode} · {paperArmed ? 'armed' : 'disarmed'}
+        </div>
+      </div>
     </aside>
   );
 }

@@ -102,7 +102,7 @@ async def db_invalid_password_handler(_request: Request, exc: InvalidPasswordErr
     return JSONResponse(
         status_code=503,
         content={
-            "detail": "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/compose.sh up -d)."
+            "detail": "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/dev/compose.sh up -d)."
         },
     )
 
@@ -111,7 +111,7 @@ async def db_invalid_password_handler(_request: Request, exc: InvalidPasswordErr
 async def db_operational_error_handler(_request: Request, exc: OperationalError) -> JSONResponse:
     orig = getattr(exc, "orig", None)
     if type(orig).__name__ == "InvalidPasswordError" or "password authentication failed" in str(orig or exc):
-        detail = "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/compose.sh up -d)."
+        detail = "Database unavailable: password authentication failed. Check POSTGRES_PASSWORD in .env and that the postgres container was started with the same .env (e.g. ./scripts/dev/compose.sh up -d)."
     else:
         detail = f"Database unavailable: {str(orig) if orig else str(exc)}"
     return JSONResponse(status_code=503, content={"detail": detail})

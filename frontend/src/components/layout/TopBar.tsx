@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
 import { ENDPOINTS } from '../../api/endpoints';
-import type { HealthResponse, StrategiesResponse } from '../../types/api';
+import type { HealthResponse, StrategiesResponse, RuntimeStatusResponse } from '../../types/api';
 import { StateBadge } from '../shared/StateBadge';
 
 export function TopBar() {
@@ -14,18 +14,18 @@ export function TopBar() {
     queryKey: ['strategies'],
     queryFn: () => apiGet<StrategiesResponse>(ENDPOINTS.strategies),
   });
-  const { data: config } = useQuery({
-    queryKey: ['config'],
-    queryFn: () => apiGet<Record<string, unknown>>(ENDPOINTS.config),
-    refetchInterval: 60_000,
+  const { data: runtimeStatus } = useQuery({
+    queryKey: ['runtimeStatus'],
+    queryFn: () => apiGet<RuntimeStatusResponse>(ENDPOINTS.runtimeStatus),
+    refetchInterval: 15_000,
   });
 
-  const strategy = strategies?.strategies?.[0];
-  const strategyLabel = strategy ? `${strategy.strategy_id} / ${strategy.strategy_version}` : '—';
-  const modeLabel = strategy?.mode ?? '—';
+  const allStrategies = strategies?.strategies ?? [];
+  const enabledStrategies = allStrategies.filter(s => s.enabled);
+  const paperStrategies = allStrategies.filter(s => s.paper_enabled);
   const apiOk = health?.status === 'ok';
-  const scrappyMode = (config?.SCRAPPY_MODE as string) ?? '—';
-  const refereeMode = (config?.AI_REFEREE_ENABLED ? (config?.AI_REFEREE_MODE as string) : 'off') ?? '—';
+  const paperArmed = runtimeStatus?.paper_trading_armed ?? false;
+  const executionMode = runtimeStatus?.strategy?.execution_mode ?? 'shadow';
 
   const lastUpdated = dataUpdatedAt
     ? new Date(dataUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -34,7 +34,7 @@ export function TopBar() {
   return (
     <header className="topbar">
       <div className="topbar__left">
-        <div className="topbar__live-dot" title="Live — polling every 30s" />
+        <div className="topbar__live-dot" title="Live — polling" />
         <span className="topbar__live-label">LIVE</span>
         {lastUpdated && (
           <span className="topbar__updated">updated {lastUpdated}</span>
@@ -45,10 +45,21 @@ export function TopBar() {
           label={apiOk ? 'API ok' : 'API —'}
           variant={apiOk ? 'success' : 'neutral'}
         />
-        <StateBadge label={strategyLabel} variant="default" />
-        <StateBadge label={modeLabel} variant="default" />
-        <StateBadge label={`scrappy ${scrappyMode}`} variant="neutral" />
-        <StateBadge label={`referee ${refereeMode}`} variant="neutral" />
+        <StateBadge
+          label={paperArmed ? 'ARMED' : 'DISARMED'}
+          variant={paperArmed ? 'success' : 'error'}
+        />
+        <StateBadge
+          label={`${enabledStrategies.length} strategies`}
+          variant="default"
+        />
+        {paperStrategies.length > 0 && (
+          <StateBadge
+            label={`${paperStrategies.length} paper`}
+            variant="default"
+          />
+        )}
+        <StateBadge label={executionMode} variant="neutral" />
       </div>
     </header>
   );

@@ -1,5 +1,5 @@
-# StockBot stack. Run from repo root: ./scripts/compose.sh up -d
-# Full rebuild: ./scripts/compose.sh build --no-cache && ./scripts/compose.sh up -d --force-recreate
+# StockBot stack. Run from repo root: ./scripts/dev/compose.sh up -d
+# Full rebuild: ./scripts/dev/compose.sh build --no-cache && ./scripts/dev/compose.sh up -d --force-recreate
 services:
   postgres:
     image: postgres:16-alpine

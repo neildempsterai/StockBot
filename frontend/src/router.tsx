@@ -11,7 +11,6 @@ import { Portfolio } from './pages/Portfolio';
 import { ShadowTrades } from './pages/ShadowTrades';
 import { SystemHealth } from './pages/SystemHealth';
 import { StrategyLab } from './pages/StrategyLab';
-import { History } from './pages/History';
 import { Settings } from './pages/Settings';
 import { Orders } from './pages/Orders';
 import { Activities } from './pages/Activities';
@@ -49,7 +48,7 @@ export const router = createBrowserRouter([
       { path: 'shadow-trades', element: <ShadowTrades /> },
       { path: 'system-health', element: <SystemHealth /> },
       { path: 'strategy-lab', element: <StrategyLab /> },
-      { path: 'history', element: <History /> },
+      { path: 'history', element: <Navigate to="/shadow-trades" replace /> },
       { path: 'settings', element: <Settings /> },
       { path: 'orders', element: <Orders /> },
       { path: 'orders/:orderId', element: <OrderDetail /> },

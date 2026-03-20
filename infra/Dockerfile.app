@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Project files
 COPY pyproject.toml alembic.ini ./
 COPY migrations ./migrations
-COPY scripts/entrypoint_api.sh ./scripts/
+COPY scripts/ops/entrypoint_api.sh ./scripts/
 COPY src ./src
 
 # Install app (editable so src is used)
