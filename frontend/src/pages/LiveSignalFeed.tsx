@@ -6,7 +6,9 @@ import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
 import { EmptyState } from '../components/shared/EmptyState';
 import { SectionHeader } from '../components/shared/SectionHeader';
+import { StateBadge } from '../components/shared/StateBadge';
 import { formatTs } from '../utils/format';
+import type { PaperExposureResponse } from '../types/api';
 
 interface SignalRow {
   signal_uuid: string;
@@ -17,6 +19,7 @@ interface SignalRow {
   strategy_id?: string;
   strategy_version?: string;
   reason_codes?: string[];
+  paper_order_id?: string;
 }
 
 export function LiveSignalFeed() {
@@ -25,6 +28,16 @@ export function LiveSignalFeed() {
     queryFn: () => apiGet<{ signals?: SignalRow[] }>(`${ENDPOINTS.signals}?limit=50`),
     refetchInterval: 15_000,
   });
+  const { data: paperExposure } = useQuery({
+    queryKey: ['paperExposure'],
+    queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
+    refetchInterval: 15_000,
+  });
+  
+  // Create a set of signal UUIDs that have open paper positions
+  const openPaperSignalUuids = new Set(
+    paperExposure?.positions?.filter(p => p.signal_uuid).map(p => p.signal_uuid) ?? []
+  );
 
   if (isLoading) {
     return (
@@ -63,27 +76,46 @@ export function LiveSignalFeed() {
                 <th>Time</th>
                 <th>Strategy</th>
                 <th>Reasons</th>
+                <th>Status</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {signals.map((s) => (
-                <tr key={s.signal_uuid}>
-                  <td className="cell--symbol">{s.symbol}</td>
-                  <td>
-                    <span className={s.side?.toLowerCase() === 'buy' ? 'signal-side signal-side--buy' : 'signal-side signal-side--sell'}>
-                      {s.side?.toUpperCase()}
-                    </span>
-                  </td>
-                  <td>{s.qty}</td>
-                  <td className="cell--ts">{formatTs(s.quote_ts)}</td>
-                  <td>{s.strategy_id ?? '—'}</td>
-                  <td className="cell--muted cell--small">{(s.reason_codes ?? []).slice(0, 2).join(', ')}</td>
-                  <td>
-                    <Link to={`/signals/${s.signal_uuid}`} className="link-mono">Detail</Link>
-                  </td>
-                </tr>
-              ))}
+              {signals.map((s) => {
+                const hasOpenPosition = openPaperSignalUuids.has(s.signal_uuid);
+                const hasPaperOrder = !!s.paper_order_id;
+                return (
+                  <tr 
+                    key={s.signal_uuid}
+                    style={hasOpenPosition ? { backgroundColor: 'var(--color-success-bg, rgba(63, 185, 80, 0.1))' } : undefined}
+                  >
+                    <td className="cell--symbol">{s.symbol}</td>
+                    <td>
+                      <span className={s.side?.toLowerCase() === 'buy' ? 'signal-side signal-side--buy' : 'signal-side signal-side--sell'}>
+                        {s.side?.toUpperCase()}
+                      </span>
+                    </td>
+                    <td>{s.qty}</td>
+                    <td className="cell--ts">{formatTs(s.quote_ts)}</td>
+                    <td>{s.strategy_id ?? '—'}</td>
+                    <td className="cell--muted cell--small">{(s.reason_codes ?? []).slice(0, 2).join(', ')}</td>
+                    <td>
+                      {hasOpenPosition && (
+                        <StateBadge label="Open Position" variant="success" />
+                      )}
+                      {!hasOpenPosition && hasPaperOrder && (
+                        <StateBadge label="Order Filled" variant="default" />
+                      )}
+                      {!hasOpenPosition && !hasPaperOrder && (
+                        <span className="muted-text">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <Link to={`/signals/${s.signal_uuid}`} className="link-mono">Detail</Link>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

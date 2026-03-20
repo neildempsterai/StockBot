@@ -568,6 +568,11 @@ async def get_signal(signal_uuid: UUID) -> dict:
                 snapshot = r.scalars().first()
             if getattr(s, "ai_referee_assessment_id", None):
                 referee = await get_assessment_row_by_pk(session, s.ai_referee_assessment_id)
+            # Look up lifecycle by signal_uuid
+            lifecycle_result = await session.execute(
+                select(PaperLifecycle).where(PaperLifecycle.signal_uuid == signal_uuid).limit(1)
+            )
+            lifecycle = lifecycle_result.scalars().first()
     if not s:
         raise HTTPException(status_code=404, detail="not_found")
     reason_codes = s.reason_codes or []
@@ -597,6 +602,24 @@ async def get_signal(signal_uuid: UUID) -> dict:
         out["intelligence_snapshot"] = _snapshot_to_dict(snapshot)
     if referee:
         out["ai_referee_assessment"] = _referee_assessment_to_dict(referee)
+    if lifecycle:
+        out["lifecycle"] = {
+            "lifecycle_status": lifecycle.lifecycle_status,
+            "entry_order_id": lifecycle.entry_order_id,
+            "exit_order_id": lifecycle.exit_order_id,
+            "stop_price": float(lifecycle.stop_price) if lifecycle.stop_price else None,
+            "target_price": float(lifecycle.target_price) if lifecycle.target_price else None,
+            "force_flat_time": lifecycle.force_flat_time,
+            "protection_mode": lifecycle.protection_mode,
+            "protection_active": lifecycle.exit_order_id is not None,
+            "managed_status": "exited" if lifecycle.lifecycle_status in ("exited", "exit_submitted") else
+                             "managed" if lifecycle.lifecycle_status in ("entry_filled", "exit_pending") else
+                             "pending" if lifecycle.lifecycle_status == "entry_submitted" else
+                             "orphaned" if lifecycle.lifecycle_status == "orphaned" else
+                             "blocked" if lifecycle.lifecycle_status == "blocked" else "unknown",
+            "universe_source": lifecycle.universe_source,
+            "static_fallback_at_entry": lifecycle.universe_source == "static",
+        }
     return out
 
 

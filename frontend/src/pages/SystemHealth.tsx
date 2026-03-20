@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
-import type { HealthDetailResponse, RuntimeStatusResponse, PaperArmingPrerequisitesResponse, ReconciliationResponse } from '../types/api';
+import type { HealthDetailResponse, RuntimeStatusResponse, PaperArmingPrerequisitesResponse, ReconciliationResponse, PaperExposureResponse } from '../types/api';
 import { KPICard } from '../components/shared/KPICard';
 import { SectionHeader } from '../components/shared/SectionHeader';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
@@ -29,6 +29,14 @@ export function SystemHealth() {
     queryFn: () => apiGet<ReconciliationResponse>(ENDPOINTS.systemReconciliation),
     refetchInterval: 30_000,
   });
+  const { data: paperExposure } = useQuery({
+    queryKey: ['paperExposure'],
+    queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
+    refetchInterval: 15_000,
+  });
+  
+  const orphanedCount = paperExposure?.positions?.filter(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged').length ?? 0;
+  const openPositionsCount = paperExposure?.positions?.length ?? 0;
 
   if (isLoading) {
     return (
@@ -178,6 +186,32 @@ export function SystemHealth() {
           <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
             Dynamic universe last updated: {formatTs(runtimeStatus.symbol_source.dynamic_universe_last_updated_at)}
           </p>
+        )}
+      </section>
+
+      <section className="dashboard-section">
+        <SectionHeader title="Paper Exposure Status" subtitle="Current positions and lifecycle health" />
+        <div className="grid-cards grid-cards--4">
+          <KPICard title="Open Positions" value={openPositionsCount} />
+          <KPICard 
+            title="Orphaned/Unmanaged" 
+            value={orphanedCount}
+            valueClass={orphanedCount > 0 ? 'pnl--negative' : ''}
+          />
+          <KPICard
+            title="Managed"
+            value={openPositionsCount - orphanedCount}
+            valueClass={openPositionsCount - orphanedCount > 0 ? 'pnl--positive' : ''}
+          />
+          <KPICard
+            title="Broker Reachable"
+            value={prerequisites?.checks?.broker_reachable?.ok ? 'Yes' : 'No'}
+          />
+        </div>
+        {orphanedCount > 0 && (
+          <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
+            <strong>⚠ Warning:</strong> {orphanedCount} position(s) are orphaned or unmanaged. Review in Command Center or Portfolio.
+          </div>
         )}
       </section>
 

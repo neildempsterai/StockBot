@@ -8,6 +8,8 @@ import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
 import { EmptyState } from '../components/shared/EmptyState';
 import { formatTs, formatPnl, pnlClass } from '../utils/format';
+import { SourceBadge } from '../components/shared/SourceBadge';
+import { Link } from 'react-router-dom';
 
 type OrderStatus = 'open' | 'closed' | 'all';
 
@@ -94,14 +96,22 @@ function OrderRow({ order, allOrders }: { order: PaperOrder; allOrders: PaperOrd
           <span className={sideBadgeClass(order.side)}>{order.side.toUpperCase()}</span>
         )}
       </td>
-      <td>{qty}</td>
-      <td>{order.order_type ?? order.type ?? '—'}</td>
-      <td>
-        {order.status && (
-          <span className={statusBadgeClass(order.status)}>{order.status}</span>
-        )}
-      </td>
-      <td>{filledPrice}</td>
+                      <td>{qty}</td>
+                      <td>{order.order_type ?? order.type ?? '—'}</td>
+                      <td>
+                        {order.status && (
+                          <span className={statusBadgeClass(order.status)}>{order.status}</span>
+                        )}
+                      </td>
+                      <td>
+                        <SourceBadge source={(order as any).order_source ?? (order as any).order_origin ? ((order as any).order_origin === 'strategy' ? 'strategy_paper' : (order as any).order_origin === 'operator_test' ? 'operator_test' : 'legacy_unknown') : 'legacy_unknown'} />
+                        {(order as any).signal_uuid && (
+                          <Link to={`/signals/${(order as any).signal_uuid}`} className="link-mono" style={{ fontSize: '0.75rem', display: 'block', marginTop: '0.25rem' }}>
+                            Signal →
+                          </Link>
+                        )}
+                      </td>
+                      <td>{filledPrice}</td>
       <td>{tradeValue}</td>
       <td className={pnl.realizedPnl != null ? pnlClass(pnl.realizedPnl) : ''}>
         {pnl.realizedPnl != null ? formatPnl(pnl.realizedPnl) : '—'}
@@ -171,6 +181,7 @@ export function Orders() {
                     <th>Qty</th>
                     <th>Type</th>
                     <th>Status</th>
+                    <th>Source</th>
                     <th>Filled @</th>
                     <th>Trade Value</th>
                     <th>Realized P&L</th>

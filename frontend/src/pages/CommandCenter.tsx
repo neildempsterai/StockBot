@@ -176,7 +176,9 @@ export function CommandCenter() {
                     <th>Lifecycle</th>
                     <th>Stop</th>
                     <th>Target</th>
+                    <th>Force-Flat</th>
                     <th>Protection</th>
+                    <th>Exit Order</th>
                     <th>Intelligence</th>
                     <th>Sizing</th>
                     <th>Entry</th>
@@ -198,8 +200,18 @@ export function CommandCenter() {
                       <td><LifecycleStatusBadge status={pos.lifecycle_status} /></td>
                       <td>{pos.stop_price != null ? `$${Number(pos.stop_price).toFixed(2)}` : '—'}</td>
                       <td>{pos.target_price != null ? `$${Number(pos.target_price).toFixed(2)}` : '—'}</td>
+                      <td>{pos.force_flat_time ?? '—'}</td>
                       <td>
                         <ProtectionModeBadge mode={pos.protection_mode} active={pos.protection_active} />
+                      </td>
+                      <td>
+                        {pos.exit_order_id ? (
+                          <Link to={`/orders/${pos.exit_order_id}`} className="link-mono" style={{ fontSize: '0.85rem' }}>
+                            {pos.exit_order_id.slice(0, 12)}…
+                          </Link>
+                        ) : (
+                          <span className="muted-text">—</span>
+                        )}
                       </td>
                       <td>
                         <IntelligenceBadge

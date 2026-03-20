@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { apiGet, apiPost } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
 import type {
@@ -7,6 +8,7 @@ import type {
   ScrappyStatusResponse,
   ScrappyAutoRunsResponse,
   RuntimeStatusResponse,
+  PaperExposureResponse,
 } from '../types/api';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
@@ -14,6 +16,7 @@ import { KPICard } from '../components/shared/KPICard';
 import { RefreshBadge } from '../components/shared/RefreshBadge';
 import { SectionHeader } from '../components/shared/SectionHeader';
 import { EmptyState } from '../components/shared/EmptyState';
+import { StateBadge } from '../components/shared/StateBadge';
 import { formatTs } from '../utils/format';
 
 export function IntelligenceCenter() {
@@ -43,6 +46,16 @@ export function IntelligenceCenter() {
     queryFn: () => apiGet<RuntimeStatusResponse>(ENDPOINTS.runtimeStatus),
     refetchInterval: 30_000,
   });
+  const { data: paperExposure } = useQuery({
+    queryKey: ['paperExposure'],
+    queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
+    refetchInterval: 15_000,
+  });
+  
+  // Create a map of symbols with open positions
+  const symbolsWithOpenPositions = new Set(
+    paperExposure?.positions?.map((p: { symbol?: string }) => p.symbol?.toUpperCase()).filter(Boolean) ?? []
+  );
   const runScrappyMutation = useMutation({
     mutationFn: () =>
       apiPost<{ run_id?: string; outcome_code?: string; notes_created?: number; run_type?: string }>(
@@ -204,6 +217,7 @@ export function IntelligenceCenter() {
             <thead>
               <tr>
                 <th>Symbol</th>
+                <th>Live Position</th>
                 <th>Catalyst</th>
                 <th>Direction</th>
                 <th>Sentiment</th>
@@ -221,9 +235,38 @@ export function IntelligenceCenter() {
                 const stale = safeBool(s.stale_flag);
                 const conflict = safeBool(s.conflict_flag);
                 const badgeClass = strength ? `catalyst-badge--${String(strength).toLowerCase().replace(/\s/g, '-')}` : '';
+                const symbolUpper = String(s.symbol ?? '').toUpperCase();
+                const hasOpenPosition = symbolsWithOpenPositions.has(symbolUpper);
+                const position = paperExposure?.positions?.find((p: { symbol?: string }) => p.symbol?.toUpperCase() === symbolUpper);
                 return (
-                  <tr key={s.id}>
-                    <td className="cell--symbol">{String(s.symbol ?? '')}</td>
+                  <tr 
+                    key={s.id}
+                    style={hasOpenPosition ? { backgroundColor: 'var(--color-success-bg, rgba(63, 185, 80, 0.1))' } : undefined}
+                  >
+                    <td className="cell--symbol">
+                      {String(s.symbol ?? '')}
+                      {hasOpenPosition && position && (
+                        <Link to="/portfolio" className="link-mono" style={{ fontSize: '0.75rem', display: 'block', marginTop: '0.25rem' }}>
+                          View position →
+                        </Link>
+                      )}
+                    </td>
+                    <td>
+                      {hasOpenPosition && position ? (
+                        <div style={{ fontSize: '0.85rem' }}>
+                          <StateBadge label={`${position.side?.toUpperCase()} ${position.qty}`} variant="success" />
+                          <div className="muted-text" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                            {position.unrealized_pl != null ? (
+                              <span className={position.unrealized_pl >= 0 ? 'pnl--positive' : 'pnl--negative'}>
+                                {position.unrealized_pl >= 0 ? '+' : ''}${position.unrealized_pl.toFixed(2)}
+                              </span>
+                            ) : '—'}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="muted-text">—</span>
+                      )}
+                    </td>
                     <td>
                       {strength != null && strength !== '' ? (
                         <span className={`catalyst-badge ${badgeClass}`.trim()}>

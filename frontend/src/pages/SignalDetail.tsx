@@ -6,6 +6,8 @@ import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
 import { SectionHeader } from '../components/shared/SectionHeader';
 import { StateBadge } from '../components/shared/StateBadge';
+import { ManagedStatusBadge } from '../components/shared/ManagedStatusBadge';
+import { ProtectionModeBadge } from '../components/shared/ProtectionModeBadge';
 import { formatTs, formatDateTime } from '../utils/format';
 
 export function SignalDetail() {
@@ -50,6 +52,19 @@ export function SignalDetail() {
   const aiRefereeAssessment = data.ai_referee_assessment as Record<string, unknown> | undefined;
   const paperOrderId = data.paper_order_id as string | undefined;
   const executionMode = data.execution_mode as string | undefined;
+  const lifecycle = data.lifecycle as {
+    lifecycle_status?: string;
+    entry_order_id?: string;
+    exit_order_id?: string;
+    stop_price?: number;
+    target_price?: number;
+    force_flat_time?: string;
+    protection_mode?: string;
+    protection_active?: boolean;
+    managed_status?: string;
+    universe_source?: string;
+    static_fallback_at_entry?: boolean;
+  } | undefined;
 
   return (
     <div className="page-stack">
@@ -97,8 +112,66 @@ export function SignalDetail() {
               </Link>
             </div>
           )}
+          {lifecycle && (
+            <>
+              <div>
+                <strong>Lifecycle status:</strong>{' '}
+                <ManagedStatusBadge status={lifecycle.managed_status} />
+              </div>
+              {lifecycle.entry_order_id && (
+                <div>
+                  <strong>Entry order:</strong>{' '}
+                  <Link to={`/orders/${lifecycle.entry_order_id}`} className="link-mono">
+                    {lifecycle.entry_order_id.slice(0, 16)}…
+                  </Link>
+                </div>
+              )}
+              {lifecycle.exit_order_id && (
+                <div>
+                  <strong>Exit order:</strong>{' '}
+                  <Link to={`/orders/${lifecycle.exit_order_id}`} className="link-mono">
+                    {lifecycle.exit_order_id.slice(0, 16)}…
+                  </Link>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </section>
+
+      {lifecycle && (
+        <section className="dashboard-section">
+          <SectionHeader title="Exit Plan & Protection" subtitle="Lifecycle-managed exit strategy" />
+          <div className="grid-cards grid-cards--4">
+            <div>
+              <div className="kpi-card__title">Stop Price</div>
+              <div className="kpi-card__value">{lifecycle.stop_price != null ? `$${lifecycle.stop_price.toFixed(2)}` : '—'}</div>
+            </div>
+            <div>
+              <div className="kpi-card__title">Target Price</div>
+              <div className="kpi-card__value">{lifecycle.target_price != null ? `$${lifecycle.target_price.toFixed(2)}` : '—'}</div>
+            </div>
+            <div>
+              <div className="kpi-card__title">Force-Flat Time</div>
+              <div className="kpi-card__value">{lifecycle.force_flat_time ?? '—'}</div>
+            </div>
+            <div>
+              <div className="kpi-card__title">Protection</div>
+              <div className="kpi-card__value">
+                <ProtectionModeBadge mode={lifecycle.protection_mode} active={lifecycle.protection_active} />
+              </div>
+            </div>
+          </div>
+          {lifecycle.static_fallback_at_entry && (
+            <div className="info-note" style={{ marginTop: '1rem', borderLeft: '3px solid var(--color-warning)', backgroundColor: 'var(--color-warning-bg, #2d2b1b)' }}>
+              <strong>⚠ Static Fallback:</strong> This position was opened while using static fallback symbols.
+            </div>
+          )}
+          <div style={{ marginTop: '1rem' }}>
+            <Link to="/portfolio" className="link-mono">View position in Portfolio →</Link>
+          </div>
+        </section>
+      )}
 
       {reasonCodes.length > 0 && (
         <section className="dashboard-section">

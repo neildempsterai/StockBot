@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
 import { ENDPOINTS } from '../../api/endpoints';
-import type { RuntimeStatusResponse, PaperArmingPrerequisitesResponse } from '../../types/api';
+import type { RuntimeStatusResponse, PaperArmingPrerequisitesResponse, PaperExposureResponse } from '../../types/api';
 import { StateBadge } from './StateBadge';
 
 export function SafetyStrip() {
@@ -13,6 +13,11 @@ export function SafetyStrip() {
   const { data: prerequisites } = useQuery({
     queryKey: ['paperArmingPrerequisites'],
     queryFn: () => apiGet<PaperArmingPrerequisitesResponse>(ENDPOINTS.paperArmingPrerequisites),
+    refetchInterval: 15_000,
+  });
+  const { data: paperExposure } = useQuery({
+    queryKey: ['paperExposure'],
+    queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
     refetchInterval: 15_000,
   });
 
@@ -30,6 +35,8 @@ export function SafetyStrip() {
 
   const isStaticFallback = gatewaySource === 'static' || workerSource === 'static';
   const hasBlockers = blockers.length > 0;
+  const orphanedCount = paperExposure?.positions?.filter(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged').length ?? 0;
+  const openPositionsCount = paperExposure?.positions?.length ?? 0;
 
   return (
     <div
@@ -72,6 +79,14 @@ export function SafetyStrip() {
         )}
         {!prerequisitesSatisfied && !hasBlockers && (
           <StateBadge label="⚠ Prerequisites Not Met" variant="warning" />
+        )}
+        {openPositionsCount > 0 && (
+          <span className="muted-text" style={{ fontSize: '0.85rem' }}>
+            {openPositionsCount} open position{openPositionsCount !== 1 ? 's' : ''}
+          </span>
+        )}
+        {orphanedCount > 0 && (
+          <StateBadge label={`⚠ ${orphanedCount} Orphaned/Unmanaged`} variant="error" />
         )}
       </div>
     </div>
