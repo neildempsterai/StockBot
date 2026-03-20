@@ -125,7 +125,7 @@ export function IntelligenceCenter() {
         <strong>Automation:</strong> Scrappy runs automatically on a schedule (scanner top symbols). You do not need to trigger it manually. The buttons below are for testing or one-off overrides only.
       </div>
       <SectionHeader
-        title="Scrappy intelligence"
+        title="Scrappy Automation"
         subtitle={
           autoEnabled
             ? 'Auto-run is on. Snapshots feed opportunity ranking and signal gating.'

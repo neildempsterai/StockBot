@@ -263,7 +263,10 @@ export function Portfolio() {
       )}
 
       <section>
-        <SectionHeader title="Paper Exposure & Lifecycle" subtitle="Lifecycle-enriched positions with exit plans and protection" />
+        <SectionHeader 
+          title="Paper Exposure & Lifecycle" 
+          subtitle="Complete lifecycle detail — canonical view for all position inspection. This is the authoritative source for stop, target, protection, sizing, and managed status." 
+        />
         {exposureLoading && <LoadingSkeleton lines={4} />}
         {!exposureLoading && (!paperExposure?.positions || paperExposure.positions.length === 0) ? (
           <EmptyState message="No open paper positions with lifecycle data." icon="📊" />
@@ -271,7 +274,17 @@ export function Portfolio() {
           <>
             {paperExposure.positions.some((p) => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged') && (
               <div className="info-note" style={{ marginBottom: '1rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
-                <strong>⚠ Warning:</strong> Some positions are unmanaged or orphaned. Review exit plans and protection status.
+                <strong>⚠ Critical:</strong> {paperExposure.positions.filter(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged').length} position(s) are unmanaged or orphaned. Review exit plans and protection status below.
+              </div>
+            )}
+            {paperExposure.positions.some((p) => p.static_fallback_at_entry) && (
+              <div className="info-note" style={{ marginBottom: '1rem', borderLeft: '3px solid var(--color-warning)', backgroundColor: 'var(--color-warning-bg, #2d2b1b)' }}>
+                <strong>⚠ Warning:</strong> {paperExposure.positions.filter(p => p.static_fallback_at_entry).length} position(s) were opened using static fallback symbols.
+              </div>
+            )}
+            {paperExposure.positions.some((p) => !p.protection_active && p.managed_status !== 'exited') && (
+              <div className="info-note" style={{ marginBottom: '1rem', borderLeft: '3px solid var(--color-warning)', backgroundColor: 'var(--color-warning-bg, #2d2b1b)' }}>
+                <strong>⚠ Warning:</strong> {paperExposure.positions.filter(p => !p.protection_active && p.managed_status !== 'exited').length} position(s) have no active protection.
               </div>
             )}
             <div className="table-wrap">

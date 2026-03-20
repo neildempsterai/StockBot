@@ -1,12 +1,22 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
-import type { HealthDetailResponse, RuntimeStatusResponse, PaperArmingPrerequisitesResponse, ReconciliationResponse, PaperExposureResponse } from '../types/api';
+import type { 
+  HealthDetailResponse, 
+  RuntimeStatusResponse, 
+  PaperArmingPrerequisitesResponse, 
+  ReconciliationResponse, 
+  PaperExposureResponse,
+  ConfigResponse,
+  PaperTestProofResponse,
+  ScannerSummaryResponse,
+  ScannerRunsResponse,
+} from '../types/api';
 import { KPICard } from '../components/shared/KPICard';
 import { SectionHeader } from '../components/shared/SectionHeader';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { StateBadge } from '../components/shared/StateBadge';
-import { formatTs } from '../utils/format';
+import { formatTs, formatDateTime } from '../utils/format';
 
 export function SystemHealth() {
   const { data, isLoading } = useQuery({
@@ -33,6 +43,26 @@ export function SystemHealth() {
     queryKey: ['paperExposure'],
     queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
     refetchInterval: 15_000,
+  });
+  const { data: config } = useQuery({
+    queryKey: ['config'],
+    queryFn: () => apiGet<ConfigResponse>(ENDPOINTS.config),
+    refetchInterval: 60_000,
+  });
+  const { data: paperTestProof } = useQuery({
+    queryKey: ['paperTestProof'],
+    queryFn: () => apiGet<PaperTestProofResponse>(ENDPOINTS.paperTestProof),
+    refetchInterval: 30_000,
+  });
+  const { data: scannerSummary } = useQuery({
+    queryKey: ['scannerSummary'],
+    queryFn: () => apiGet<ScannerSummaryResponse>(ENDPOINTS.scannerSummary),
+    refetchInterval: 30_000,
+  });
+  const { data: scannerRuns } = useQuery({
+    queryKey: ['scannerRuns'],
+    queryFn: () => apiGet<ScannerRunsResponse>(ENDPOINTS.scannerRuns),
+    refetchInterval: 30_000,
   });
   
   const orphanedCount = paperExposure?.positions?.filter(p => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged').length ?? 0;
@@ -253,6 +283,111 @@ export function SystemHealth() {
           Fallback: gateway — {data.gateway_fallback_reason ?? '—'} · worker — {data.worker_fallback_reason ?? '—'}
         </div>
       )}
+
+      {config && (
+        <section className="dashboard-section">
+          <SectionHeader title="Execution & Modes" subtitle="Deterministic strategy is sole trade authority" />
+          <div className="grid-cards grid-cards--4">
+            <KPICard title="Execution mode" value={config.EXECUTION_MODE ?? '—'} />
+            <KPICard title="Scrappy mode" value={config.SCRAPPY_MODE ?? '—'} />
+            <KPICard title="AI referee" value={config.AI_REFEREE_ENABLED ? 'Enabled' : 'Off'} />
+            <KPICard title="Paper execution" value={config.PAPER_EXECUTION_ENABLED ? 'On' : 'Off'} />
+          </div>
+        </section>
+      )}
+
+      <section className="dashboard-section">
+        <SectionHeader title="Scanner Status" subtitle="Last run and rejection reasons" />
+        <div className="grid-cards grid-cards--3">
+          <KPICard
+            title="Last run"
+            value={scannerSummary?.last_run_ts ? formatDateTime(scannerSummary.last_run_ts) : '—'}
+            subtitle={scannerSummary?.last_run_status ?? undefined}
+          />
+          <KPICard title="Top candidates" value={scannerSummary?.top_count ?? '—'} />
+          <KPICard
+            title="Universe / scored"
+            value={scannerRuns?.runs?.[0] ? `${scannerRuns.runs[0].universe_size} / ${scannerRuns.runs[0].candidates_scored}` : '—'}
+          />
+        </div>
+        {scannerSummary?.rejection_reasons && Object.keys(scannerSummary.rejection_reasons).length > 0 && (
+          <div style={{ marginTop: '1rem' }}>
+            <strong>Top rejection reasons</strong>
+            <div className="badge-row" style={{ marginTop: '0.5rem' }}>
+              {Object.entries(scannerSummary.rejection_reasons)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10)
+                .map(([reason, count]) => (
+                  <StateBadge key={reason} label={`${reason}: ${count}`} variant="warning" />
+                ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {scannerRuns?.runs && scannerRuns.runs.length > 0 && (
+        <section className="dashboard-section">
+          <SectionHeader title="Scanner History" subtitle="Recent runs" />
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Status</th>
+                  <th>Universe</th>
+                  <th>Scored</th>
+                  <th>Top</th>
+                  <th>Session</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scannerRuns.runs.slice(0, 10).map((r) => (
+                  <tr key={r.run_id}>
+                    <td>{r.run_ts ? formatDateTime(r.run_ts) : '—'}</td>
+                    <td><StateBadge label={r.status ?? '—'} variant={r.status === 'completed' ? 'success' : 'default'} /></td>
+                    <td>{r.universe_size}</td>
+                    <td>{r.candidates_scored}</td>
+                    <td>{r.top_candidates_count}</td>
+                    <td>{r.market_session ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      <section className="dashboard-section">
+        <SectionHeader title="Paper Test Proof" subtitle="Last operator-test order per flow — proves all four flows ran and are persisted" />
+        <div className="grid-cards grid-cards--4">
+          {(paperTestProof?.intents ?? ['buy_open', 'sell_close', 'short_open', 'buy_cover']).map((intent) => {
+            const entry = paperTestProof?.proof?.[intent];
+            const label = intent.replace(/_/g, ' ');
+            return (
+              <div key={intent} className={`kpi-card ${entry ? 'kpi-card--ok' : ''}`}>
+                <div className="kpi-card__title">{label}</div>
+                <div className="kpi-card__value">
+                  {entry ? (
+                    <>
+                      <StateBadge label={entry.status ?? '—'} variant={entry.status === 'filled' ? 'success' : entry.status === 'accepted' || entry.status === 'new' ? 'default' : 'warning'} />
+                      <span className="muted-text" style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.85rem' }}>
+                        {entry.symbol} {entry.side} {entry.qty != null ? entry.qty : ''}
+                      </span>
+                      {entry.order_id && (
+                        <span className="muted-text" style={{ display: 'block', fontSize: '0.75rem' }} title={entry.order_id}>
+                          {entry.order_id.slice(0, 12)}…
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="muted-text">Not run yet</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }
