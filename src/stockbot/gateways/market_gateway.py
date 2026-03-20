@@ -74,7 +74,7 @@ REDIS_KEY_GATEWAY_SYMBOL_REFRESH_TS = "stockbot:gateway:market:symbol_refresh_ts
 REDIS_KEY_GATEWAY_SYMBOL_COUNT = "stockbot:gateway:market:symbol_count"
 REDIS_KEY_GATEWAY_SYMBOL_SOURCE = "stockbot:gateway:market:symbol_source"
 REDIS_KEY_GATEWAY_FALLBACK_REASON = "stockbot:gateway:market:fallback_reason"
-GATEWAY_REDIS_TTL_SEC = 120
+GATEWAY_REDIS_TTL_SEC = 300  # 5 minutes to prevent expiration during reconnects
 
 
 def _get_symbols() -> list[str]:
@@ -193,8 +193,8 @@ async def reseed_from_snapshots(stream_client: StreamClient, symbols: list[str])
             await stream_client._dispatch("trade", {"trade": snap.latest_trade, "raw": {}})
 
 
-async def _heartbeat_loop(redis_client: redis.Redis) -> None:
-    """Write heartbeat to Redis so API health can report gateway status."""
+async def _heartbeat_loop(redis_client: redis.Redis, symbols: list[str], source: str, fallback_reason: str | None = None) -> None:
+    """Write heartbeat and symbol state to Redis so API health can report gateway status."""
     while True:
         try:
             await redis_client.set(
@@ -202,6 +202,8 @@ async def _heartbeat_loop(redis_client: redis.Redis) -> None:
                 datetime.now(timezone.utc).isoformat(),
                 ex=HEARTBEAT_TTL_SEC,
             )
+            # Refresh symbol state periodically to prevent expiration
+            await _write_gateway_symbol_state(redis_client, symbols, source, fallback_reason)
         except Exception:
             pass
         await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
@@ -268,21 +270,28 @@ async def run_market_gateway() -> None:
     refresh_sec = getattr(settings, "market_gateway_symbol_refresh_sec", 60)
 
     while True:
-        symbols, source, fallback_reason = await _resolve_gateway_symbols(redis_client, settings)
-        if not symbols:
+        try:
+            symbols, source, fallback_reason = await _resolve_gateway_symbols(redis_client, settings)
+            if not symbols:
+                symbols = _get_symbols()
+                source = "static"
+                fallback_reason = "no_symbols_resolved"
+
+            await _write_gateway_symbol_state(redis_client, symbols, source, fallback_reason)
+            if source == "static":
+                logger.info(
+                    "market_gateway using static fallback because %s; count=%s",
+                    fallback_reason or "no_live_top_symbols",
+                    len(symbols),
+                )
+            else:
+                logger.info("market_gateway symbols source=dynamic count=%s", len(symbols))
+        except Exception as e:
+            logger.error("market_gateway symbol resolution failed: %s", e, exc_info=True)
             symbols = _get_symbols()
             source = "static"
-            fallback_reason = "no_symbols_resolved"
-
-        await _write_gateway_symbol_state(redis_client, symbols, source, fallback_reason)
-        if source == "static":
-            logger.info(
-                "market_gateway using static fallback because %s; count=%s",
-                fallback_reason or "no_live_top_symbols",
-                len(symbols),
-            )
-        else:
-            logger.info("market_gateway symbols source=dynamic count=%s", len(symbols))
+            fallback_reason = "symbol_resolution_error"
+            await _write_gateway_symbol_state(redis_client, symbols, source, fallback_reason)
 
         try:
             await redis_client.set(
@@ -307,7 +316,7 @@ async def run_market_gateway() -> None:
         except Exception as e:
             logger.debug("backfill skipped: %s", e)
 
-        heartbeat_task = asyncio.create_task(_heartbeat_loop(redis_client))
+        heartbeat_task = asyncio.create_task(_heartbeat_loop(redis_client, symbols, source, fallback_reason))
         refresh_task = asyncio.create_task(
             _symbol_refresh_loop(redis_client, stream, settings, refresh_sec),
         )

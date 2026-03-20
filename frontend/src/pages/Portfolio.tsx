@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { apiGet } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
+import { Link } from 'react-router-dom';
 import type {
   ShadowTradesResponse,
   MetricsSummaryResponse,
@@ -18,12 +19,22 @@ import type {
   PaperPositionsResponse,
   MarketClockResponse,
   PortfolioHistoryResponse,
+  PaperExposureResponse,
+  CompareBooksResponse,
+  ReconciliationResponse,
 } from '../types/api';
 import { KPICard } from '../components/shared/KPICard';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { SectionHeader } from '../components/shared/SectionHeader';
-import { formatPnl, pnlClass } from '../utils/format';
+import { EmptyState } from '../components/shared/EmptyState';
+import { ManagedStatusBadge } from '../components/shared/ManagedStatusBadge';
+import { ProtectionModeBadge } from '../components/shared/ProtectionModeBadge';
+import { SourceBadge } from '../components/shared/SourceBadge';
+import { IntelligenceBadge } from '../components/shared/IntelligenceBadge';
+import { LifecycleStatusBadge } from '../components/shared/LifecycleStatusBadge';
+import { SizingSummary } from '../components/shared/SizingSummary';
+import { formatPnl, pnlClass, formatTs } from '../utils/format';
 
 type HistoryPeriod = '1D' | '1W' | '1M' | '3M' | '1A';
 type HistoryTimeframe = '5Min' | '15Min' | '1H' | '1D';
@@ -110,6 +121,21 @@ export function Portfolio() {
     enabled: !!account,
     retry: false,
   });
+  const { data: paperExposure, isLoading: exposureLoading } = useQuery({
+    queryKey: ['paperExposure'],
+    queryFn: () => apiGet<PaperExposureResponse>(ENDPOINTS.paperExposure),
+    refetchInterval: 15_000,
+  });
+  const { data: compareBooks } = useQuery({
+    queryKey: ['compareBooks'],
+    queryFn: () => apiGet<CompareBooksResponse>(ENDPOINTS.compareBooks),
+    refetchInterval: 30_000,
+  });
+  const { data: reconciliation } = useQuery({
+    queryKey: ['reconciliation'],
+    queryFn: () => apiGet<ReconciliationResponse>(ENDPOINTS.systemReconciliation),
+    refetchInterval: 30_000,
+  });
 
   const err = tradesError || metricsError;
   const apiErrorDetail = err && typeof err === 'object' && 'detail' in err
@@ -152,7 +178,7 @@ export function Portfolio() {
         ) : accountError && !paperUnconfigured ? (
           <BackendNotConnected message="Could not load paper account" detail={paperErrorDetail} />
         ) : account ? (
-          <div className="grid-cards grid-cards--4">
+          <div className="grid-cards grid-cards--5">
             <KPICard title="Equity" value={formatMoney(account.equity)} variant="default" />
             <KPICard title="Cash" value={formatMoney(account.cash)} variant="default" />
             <KPICard title="Buying power" value={formatMoney(account.buying_power)} variant="default" />
@@ -167,31 +193,9 @@ export function Portfolio() {
           </div>
         ) : null}
         {account && positions.length > 0 && (
-          <div className="table-wrap" style={{ marginTop: '1rem' }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Qty</th>
-                  <th>Market value</th>
-                  <th>Unrealized P&amp;L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {positions.map((p) => (
-                  <tr key={p.symbol}>
-                    <td className="cell--symbol">{p.symbol}</td>
-                    <td>{p.qty ?? '\u2014'}</td>
-                    <td>{formatMoney(p.market_value)}</td>
-                    <td className={pnlClass(p.unrealized_pl ? parseFloat(String(p.unrealized_pl)) : null)}>
-                      {formatMoney(p.unrealized_pl)}
-                      {p.unrealized_plpc != null ? ` (${(parseFloat(String(p.unrealized_plpc)) * 100).toFixed(2)}%)` : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+            {positions.length} position(s) from broker. See lifecycle details below.
+          </p>
         )}
       </section>
       {account && !paperUnconfigured && (
@@ -254,6 +258,189 @@ export function Portfolio() {
                 </AreaChart>
               </ResponsiveContainer>
             </div>
+          )}
+        </section>
+      )}
+
+      <section>
+        <SectionHeader title="Paper Exposure & Lifecycle" subtitle="Lifecycle-enriched positions with exit plans and protection" />
+        {exposureLoading && <LoadingSkeleton lines={4} />}
+        {!exposureLoading && (!paperExposure?.positions || paperExposure.positions.length === 0) ? (
+          <EmptyState message="No open paper positions with lifecycle data." icon="📊" />
+        ) : !exposureLoading && paperExposure?.positions ? (
+          <>
+            {paperExposure.positions.some((p) => p.orphaned || p.managed_status === 'orphaned' || p.managed_status === 'unmanaged') && (
+              <div className="info-note" style={{ marginBottom: '1rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
+                <strong>⚠ Warning:</strong> Some positions are unmanaged or orphaned. Review exit plans and protection status.
+              </div>
+            )}
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Qty</th>
+                    <th>Entry Price</th>
+                    <th>Current Price</th>
+                    <th>Market Value</th>
+                    <th>Unrealized P&L</th>
+                    <th>P&L %</th>
+                    <th>Source</th>
+                    <th>Strategy</th>
+                    <th>Managed</th>
+                    <th>Stop</th>
+                    <th>Target</th>
+                    <th>Force-Flat</th>
+                    <th>Protection</th>
+                    <th>Intelligence</th>
+                    <th>Sizing</th>
+                    <th>Entry</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paperExposure.positions.map((pos) => (
+                    <tr key={`${pos.symbol}-${pos.side}`}>
+                      <td className="cell--symbol">{pos.symbol}</td>
+                      <td>
+                        <span className={pos.side?.toLowerCase() === 'long' ? 'signal-side signal-side--buy' : 'signal-side signal-side--sell'}>
+                          {pos.side?.toUpperCase()}
+                        </span>
+                      </td>
+                      <td>{pos.qty}</td>
+                      <td>{pos.avg_entry_price != null ? formatMoney(pos.avg_entry_price) : '—'}</td>
+                      <td>{pos.current_price != null ? formatMoney(pos.current_price) : '—'}</td>
+                      <td>{pos.market_value != null ? formatMoney(pos.market_value) : '—'}</td>
+                      <td className={pos.unrealized_pl != null ? pnlClass(pos.unrealized_pl) : ''}>
+                        {pos.unrealized_pl != null ? formatPnl(pos.unrealized_pl) : '—'}
+                      </td>
+                      <td className={pos.unrealized_plpc != null ? pnlClass(pos.unrealized_plpc) : ''}>
+                        {pos.unrealized_plpc != null ? `${pos.unrealized_plpc >= 0 ? '+' : ''}${pos.unrealized_plpc.toFixed(2)}%` : '—'}
+                      </td>
+                      <td><SourceBadge source={pos.source} /></td>
+                      <td>
+                        {pos.strategy_id ? (
+                          <span className="muted-text" style={{ fontSize: '0.85rem' }}>
+                            {pos.strategy_id}
+                            {pos.strategy_version && ` v${pos.strategy_version}`}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td><ManagedStatusBadge status={pos.managed_status} /></td>
+                      <td>{pos.stop_price != null ? `$${Number(pos.stop_price).toFixed(2)}` : '—'}</td>
+                      <td>{pos.target_price != null ? `$${Number(pos.target_price).toFixed(2)}` : '—'}</td>
+                      <td>{pos.force_flat_time ?? '—'}</td>
+                      <td>
+                        <ProtectionModeBadge mode={pos.protection_mode} active={pos.protection_active} />
+                      </td>
+                      <td>
+                        <IntelligenceBadge
+                          scrappy={pos.scrappy_at_entry ? { present: true, stale: pos.scrappy_detail?.stale_flag, conflict: pos.scrappy_detail?.conflict_flag } : false}
+                          aiReferee={pos.ai_referee_at_entry ? { ran: pos.ai_referee_detail?.ran } : false}
+                          compact
+                        />
+                      </td>
+                      <td><SizingSummary sizing={pos.sizing_at_entry} compact /></td>
+                      <td className="cell--ts">{pos.entry_ts ? formatTs(pos.entry_ts) : '—'}</td>
+                      <td>
+                        {pos.signal_uuid && (
+                          <Link to={`/signals/${pos.signal_uuid}`} className="link-mono" style={{ fontSize: '0.85rem' }}>
+                            Signal
+                          </Link>
+                        )}
+                        {pos.entry_order_id && (
+                          <span className="muted-text" style={{ fontSize: '0.75rem', display: 'block' }}>
+                            Entry: {pos.entry_order_id.slice(0, 12)}…
+                          </span>
+                        )}
+                        {pos.exit_order_id && (
+                          <span className="muted-text" style={{ fontSize: '0.75rem', display: 'block' }}>
+                            Exit: {pos.exit_order_id.slice(0, 12)}…
+                          </span>
+                        )}
+                        {pos.lifecycle_status && (
+                          <LifecycleStatusBadge status={pos.lifecycle_status} />
+                        )}
+                        {pos.static_fallback_at_entry && (
+                          <span className="flag-badge flag-badge--warn" style={{ fontSize: '0.75rem', display: 'block', marginTop: '0.25rem' }}>
+                            Static fallback
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : null}
+      </section>
+
+      {compareBooks && (
+        <section>
+          <SectionHeader title="Compare Books" subtitle="Paper vs shadow summary" />
+          <div className="grid-cards grid-cards--4">
+            <KPICard
+              title="Shadow trades"
+              value={compareBooks.shadow?.trade_count ?? 0}
+              variant="shadow"
+            />
+            <KPICard
+              title="Shadow P&L"
+              value={compareBooks.shadow?.total_net_pnl != null ? formatPnl(compareBooks.shadow.total_net_pnl) : '—'}
+              variant="shadow"
+              valueClass={pnlClass(compareBooks.shadow?.total_net_pnl)}
+            />
+            <KPICard
+              title="Paper fills"
+              value={compareBooks.paper?.fill_count ?? 0}
+            />
+            <KPICard
+              title="Paper P&L"
+              value={compareBooks.paper?.total_net_pnl != null ? formatPnl(compareBooks.paper.total_net_pnl) : '—'}
+              valueClass={pnlClass(compareBooks.paper?.total_net_pnl ?? null)}
+            />
+          </div>
+          {compareBooks.note && (
+            <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+              {compareBooks.note}
+            </p>
+          )}
+        </section>
+      )}
+
+      {reconciliation && (
+        <section>
+          <SectionHeader title="Reconciliation" subtitle="Latest reconciliation run status" />
+          <div className="grid-cards grid-cards--5">
+            <KPICard
+              title="Status"
+              value={reconciliation.status ?? '—'}
+            />
+            <KPICard
+              title="Orders matched"
+              value={reconciliation.orders_matched ?? 0}
+            />
+            <KPICard
+              title="Orders mismatch"
+              value={reconciliation.orders_mismatch ?? 0}
+            />
+            <KPICard
+              title="Positions matched"
+              value={reconciliation.positions_matched ?? 0}
+            />
+            <KPICard
+              title="Positions mismatch"
+              value={reconciliation.positions_mismatch ?? 0}
+            />
+          </div>
+          {reconciliation.run_at && (
+            <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+              Last run: {formatTs(reconciliation.run_at)}
+            </p>
           )}
         </section>
       )}

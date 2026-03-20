@@ -101,7 +101,7 @@ class StreamClient:
         auth_data = json.loads(auth_resp)
         if isinstance(auth_data, list):
             for item in auth_data:
-                if item.get("T") == "success" and item.get("msg") == "authenticated":
+                if item.get("T") == "success" and (item.get("msg") == "authenticated" or item.get("msg") == "connected"):
                     break
             else:
                 raise RuntimeError(f"Alpaca data auth failed: {auth_data}")

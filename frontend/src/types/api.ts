@@ -244,3 +244,161 @@ export interface ScannerRunHistoricalResponse {
   run_ids?: string[];
   [key: string]: unknown;
 }
+
+export interface PaperExposureResponse {
+  positions?: PaperExposurePosition[];
+  count?: number;
+}
+
+export interface PaperExposurePosition {
+  symbol: string;
+  side: string;
+  qty: number;
+  entry_ts?: string;
+  source?: string;
+  order_origin?: string;
+  operator_intent?: string;
+  strategy_id?: string;
+  strategy_version?: string;
+  signal_uuid?: string;
+  entry_order_id?: string;
+  exit_order_id?: string;
+  scrappy_at_entry?: string;
+  scrappy_detail?: {
+    snapshot_id?: number;
+    freshness_minutes?: number;
+    catalyst_direction?: string;
+    evidence_count?: number;
+    headline_count?: number;
+    stale_flag?: boolean;
+    conflict_flag?: boolean;
+  };
+  ai_referee_at_entry?: string;
+  ai_referee_detail?: {
+    ran?: boolean;
+    model_name?: string;
+    referee_version?: string;
+    decision_class?: string;
+    setup_quality_score?: number;
+    contradiction_flag?: boolean;
+    stale_flag?: boolean;
+    evidence_sufficiency?: string;
+    plain_english_rationale?: string;
+  };
+  sizing_at_entry?: {
+    equity?: number;
+    buying_power?: number;
+    stop_distance?: number;
+    risk_per_trade_pct?: number;
+    max_position_pct?: number;
+    max_gross_exposure_pct?: number;
+    max_symbol_exposure_pct?: number;
+    max_concurrent_positions?: number;
+    qty_proposed?: number;
+    qty_approved?: number;
+    notional_approved?: number;
+    rejection_reason?: string;
+  };
+  unrealized_pl?: number;
+  unrealized_plpc?: number;
+  market_value?: number;
+  current_price?: number;
+  avg_entry_price?: number;
+  exit_plan_status?: string;
+  stop_price?: number;
+  target_price?: number;
+  force_flat_time?: string;
+  protection_mode?: string;
+  protection_active?: boolean;
+  broker_protection?: string;
+  managed_status?: string;
+  orphaned?: boolean;
+  universe_source?: string;
+  static_fallback_at_entry?: boolean;
+  lifecycle_status?: string;
+  exit_reason?: string;
+  exit_ts?: string;
+  last_error?: string;
+  [key: string]: unknown;
+}
+
+export interface RuntimeStatusResponse {
+  strategy?: {
+    id?: string;
+    version?: string;
+    execution_mode?: string;
+    paper_execution_enabled?: boolean;
+  };
+  market_data?: {
+    feed?: string;
+    extended_hours_enabled?: boolean;
+  };
+  paper_execution?: {
+    supported_end_to_end?: boolean;
+    note?: string;
+  };
+  operator_paper_test?: {
+    enabled?: boolean;
+    max_qty?: number;
+    max_notional?: number;
+  };
+  scrappy?: {
+    mode?: string;
+    paper_required?: boolean;
+  };
+  ai_referee?: {
+    enabled?: boolean;
+    mode?: string;
+    paper_required?: boolean;
+  };
+  symbol_source?: {
+    gateway?: {
+      active_source?: string;
+      active_source_label?: string;
+      symbol_count?: number;
+      refresh_ts?: string;
+      fallback_reason?: string;
+    };
+    worker?: {
+      active_source?: string;
+      active_source_label?: string;
+      symbol_count?: number;
+      refresh_ts?: string;
+      fallback_reason?: string;
+    };
+    dynamic_universe_last_updated_at?: string;
+    dynamic_universe_stale_after_sec?: number;
+    error?: string;
+  };
+  paper_trading_armed?: boolean;
+  paper_armed_reason?: string;
+  [key: string]: unknown;
+}
+
+export interface PaperArmingPrerequisitesResponse {
+  satisfied?: boolean;
+  blockers?: string[];
+  checks?: Record<string, { ok?: boolean; detail?: string }>;
+}
+
+export interface CompareBooksResponse {
+  shadow?: {
+    trade_count?: number;
+    total_net_pnl?: number;
+  };
+  paper?: {
+    fill_count?: number;
+    total_net_pnl?: number | null;
+  };
+  note?: string;
+}
+
+export interface ReconciliationResponse {
+  status?: string;
+  run_at?: string;
+  orders_matched?: number;
+  orders_mismatch?: number;
+  positions_matched?: number;
+  positions_mismatch?: number;
+  details?: unknown;
+}

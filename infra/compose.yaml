@@ -71,7 +71,6 @@ services:
     env_file: [ "../.env" ]
     environment:
       RUN_MIGRATIONS: "1"
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
       REDIS_URL: redis://redis:6379/0
       ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
       ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY:-}
@@ -87,7 +86,6 @@ services:
     command: ["python", "-m", "worker.main"]
     env_file: [ "../.env" ]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
       REDIS_URL: redis://redis:6379/0
       ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
       ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
@@ -119,7 +117,6 @@ services:
     command: ["python", "-m", "stockbot.scanner.main"]
     env_file: [ "../.env" ]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
       REDIS_URL: redis://redis:6379/0
       ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID?}
       ALPACA_API_SECRET_KEY: ${ALPACA_API_SECRET_KEY?}
@@ -133,7 +130,6 @@ services:
     command: ["python", "-m", "stockbot.scrappy.auto_runner"]
     env_file: [ "../.env" ]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stockbot}:${POSTGRES_PASSWORD:-stockbot}@postgres:5432/${POSTGRES_DB:-stockbot}
       REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres: { condition: service_healthy }

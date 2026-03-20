@@ -102,6 +102,20 @@ def _paper_force_flat_close(symbol: str) -> None:
                 continue
             if qty_float == 0:
                 continue
+            side = "sell" if qty_float > 0 else "buy"
+            close_qty = abs(qty_float)
+            client.create_order(
+                symbol=symbol,
+                qty=close_qty,
+                side=side,
+                client_order_id=f"force_flat_{symbol}_{uuid4()}",
+                time_in_force="day",
+                order_type="market",
+            )
+            logger.info("paper_force_flat_close symbol=%s side=%s qty=%s", symbol, side, close_qty)
+            break
+    except Exception as e:
+        logger.warning("paper_force_flat_close failed symbol=%s error=%s", symbol, e)
 
 
 def _submit_paper_exit_order(
@@ -137,20 +151,6 @@ def _submit_paper_exit_order(
         if "403" in err or "forbidden" in err or "not allowed" in err:
             return (False, None, "paper_exit_rejected")
         return (False, None, "paper_exit_skipped_broker_unavailable")
-            side = "sell" if qty_float > 0 else "buy"
-            close_qty = abs(qty_float)
-            client.create_order(
-                symbol=symbol,
-                qty=close_qty,
-                side=side,
-                client_order_id=f"force_flat_{symbol}_{uuid4()}",
-                time_in_force="day",
-                order_type="market",
-            )
-            logger.info("paper_force_flat_close symbol=%s side=%s qty=%s", symbol, side, close_qty)
-            break
-    except Exception as e:
-        logger.warning("paper_force_flat_close failed symbol=%s error=%s", symbol, e)
 from stockbot.strategies.state import BarLike, SymbolState
 
 logging.basicConfig(level=logging.INFO)

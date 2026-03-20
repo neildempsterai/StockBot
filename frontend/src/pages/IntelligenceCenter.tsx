@@ -6,6 +6,7 @@ import type {
   IntelligenceSummaryResponse,
   ScrappyStatusResponse,
   ScrappyAutoRunsResponse,
+  RuntimeStatusResponse,
 } from '../types/api';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { BackendNotConnected } from '../components/shared/BackendNotConnected';
@@ -35,6 +36,11 @@ export function IntelligenceCenter() {
   const { data: autoRuns } = useQuery({
     queryKey: ['scrappyAutoRuns'],
     queryFn: () => apiGet<ScrappyAutoRunsResponse>(`${ENDPOINTS.scrappyAutoRuns}?limit=5`),
+    refetchInterval: 30_000,
+  });
+  const { data: runtimeStatus } = useQuery({
+    queryKey: ['runtimeStatus'],
+    queryFn: () => apiGet<RuntimeStatusResponse>(ENDPOINTS.runtimeStatus),
     refetchInterval: 30_000,
   });
   const runScrappyMutation = useMutation({
@@ -128,6 +134,20 @@ export function IntelligenceCenter() {
           Recent auto-runs: {autoRuns.runs.slice(0, 3).map((r) => `${r.symbols_count ?? 0} symbols, ${r.notes_created ?? 0} notes`).join('; ')}
         </p>
       ) : null}
+
+      <SectionHeader
+        title="AI Referee"
+        subtitle={
+          runtimeStatus?.ai_referee?.enabled
+            ? `Enabled (${runtimeStatus.ai_referee.mode ?? 'advisory'}). ${runtimeStatus.ai_referee.paper_required ? 'Required for paper trading.' : 'Advisory only.'}`
+            : 'AI Referee is disabled. Enable AI_REFEREE_ENABLED in .env to use.'
+        }
+      />
+      <div className="grid-cards" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }}>
+        <KPICard title="Enabled" value={runtimeStatus?.ai_referee?.enabled ? 'Yes' : 'No'} />
+        <KPICard title="Mode" value={runtimeStatus?.ai_referee?.mode ?? '—'} />
+        <KPICard title="Paper required" value={runtimeStatus?.ai_referee?.paper_required ? 'Yes' : 'No'} />
+      </div>
 
       <SectionHeader title="Manual override (testing only)" subtitle="Trigger Scrappy on demand — not needed for normal operation" />
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1.5rem' }}>

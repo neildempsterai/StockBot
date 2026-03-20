@@ -729,13 +729,40 @@ def get_account_status() -> dict:
 
 @app.get("/v1/positions")
 def list_paper_positions() -> dict:
-    """Paper open positions."""
+    """Paper open positions with P&L data from Alpaca."""
     client = _alpaca_client_or_503()
     try:
         positions = client.list_positions()
-        return {"positions": positions, "count": len(positions)}
+        # Ensure all position data including P&L is included
+        enriched_positions = []
+        for p in positions:
+            enriched = dict(p)  # Copy all Alpaca fields
+            # Ensure numeric P&L fields are properly typed
+            if "unrealized_pl" in enriched:
+                try:
+                    enriched["unrealized_pl"] = float(enriched["unrealized_pl"])
+                except (TypeError, ValueError):
+                    pass
+            if "unrealized_plpc" in enriched:
+                try:
+                    enriched["unrealized_plpc"] = float(enriched["unrealized_plpc"])
+                except (TypeError, ValueError):
+                    pass
+            if "market_value" in enriched:
+                try:
+                    enriched["market_value"] = float(enriched["market_value"])
+                except (TypeError, ValueError):
+                    pass
+            enriched_positions.append(enriched)
+        return {"positions": enriched_positions, "count": len(enriched_positions)}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Alpaca positions: {str(e)[:200]}")
+        error_msg = str(e)
+        if "unauthorized" in error_msg.lower() or "401" in error_msg or "403" in error_msg:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Alpaca authentication failed: {error_msg[:200]}. Check ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY."
+            )
+        raise HTTPException(status_code=503, detail=f"Alpaca positions: {error_msg[:200]}")
 
 
 @app.get("/v1/positions/{symbol_or_asset_id}")
@@ -990,6 +1017,32 @@ async def paper_exposure() -> dict:
                     managed_status = "blocked"
             elif order_source == "legacy_unknown":
                 managed_status = "orphaned"
+            # Extract P&L data from Alpaca position
+            unrealized_pl = p.get("unrealized_pl")
+            unrealized_plpc = p.get("unrealized_plpc")
+            market_value = p.get("market_value")
+            current_price = p.get("current_price")
+            avg_entry_price = p.get("avg_entry_price")
+            try:
+                unrealized_pl_float = float(unrealized_pl) if unrealized_pl is not None else None
+            except (TypeError, ValueError):
+                unrealized_pl_float = None
+            try:
+                unrealized_plpc_float = float(unrealized_plpc) if unrealized_plpc is not None else None
+            except (TypeError, ValueError):
+                unrealized_plpc_float = None
+            try:
+                market_value_float = float(market_value) if market_value is not None else None
+            except (TypeError, ValueError):
+                market_value_float = None
+            try:
+                current_price_float = float(current_price) if current_price is not None else None
+            except (TypeError, ValueError):
+                current_price_float = None
+            try:
+                avg_entry_price_float = float(avg_entry_price) if avg_entry_price is not None else None
+            except (TypeError, ValueError):
+                avg_entry_price_float = None
             exposure.append({
                 "symbol": symbol,
                 "side": side,
@@ -1023,6 +1076,11 @@ async def paper_exposure() -> dict:
                 "exit_reason": lifecycle.exit_reason if lifecycle else None,
                 "exit_ts": lifecycle.exit_ts.isoformat() if lifecycle and lifecycle.exit_ts else None,
                 "last_error": lifecycle.last_error if lifecycle else None,
+                "unrealized_pl": unrealized_pl_float,
+                "unrealized_plpc": unrealized_plpc_float,
+                "market_value": market_value_float,
+                "current_price": current_price_float,
+                "avg_entry_price": avg_entry_price_float,
             })
     return {"positions": exposure, "count": len(exposure)}
 
@@ -1215,7 +1273,13 @@ def list_assets(
             assets = [a for a in assets if a.get("fractionable") is True]
         return {"assets": assets, "count": len(assets)}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Alpaca assets: {str(e)[:200]}")
+        error_msg = str(e)
+        if "unauthorized" in error_msg.lower() or "401" in error_msg or "403" in error_msg or "APCA" in error_msg:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Alpaca authentication failed: {error_msg[:200]}. Verify ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are correct and have proper permissions."
+            )
+        raise HTTPException(status_code=503, detail=f"Alpaca assets: {error_msg[:200]}")
 
 
 @app.get("/v1/portfolio/history")
