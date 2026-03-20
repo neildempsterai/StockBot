@@ -251,9 +251,17 @@ async def get_recent_notes(
     since: datetime | None = None,
 ) -> list[MarketIntelNote]:
     """Return recent market_intel_notes with optional filters."""
+    from sqlalchemy import or_
     q = select(MarketIntelNote).order_by(MarketIntelNote.created_at.desc()).limit(limit * 2)
     if symbol:
-        q = q.where(MarketIntelNote.primary_symbol == symbol)
+        # Search in both primary_symbol and detected_symbols JSONB array
+        symbol_upper = symbol.strip().upper()[:32]
+        q = q.where(
+            or_(
+                MarketIntelNote.primary_symbol == symbol_upper,
+                MarketIntelNote.detected_symbols.contains([symbol_upper])
+            )
+        )
     if run_id:
         q = q.where(MarketIntelNote.scrappy_run_id == run_id)
     if catalyst_type:
