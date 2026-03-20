@@ -2,7 +2,13 @@
 
 **Date:** 2026-03-20  
 **Git Commit:** HEAD (latest push)  
-**Status:** **PARTIALLY IMPLEMENTED** - Phases 0-2 complete, Phases 3-6 incomplete
+**Status:** **SUBSTANTIALLY COMPLETE** - Phases 0-4 complete, Phases 5-6 partially complete
+
+> **Note:** See `LIFECYCLE_COMPLETION_SUMMARY.md` for the definitive lifecycle status.
+> Phases 3-4 were completed in the lifecycle completion tranche (same date).
+> The multi-strategy system (OPEN_DRIVE_MOMO, INTRADAY_CONTINUATION,
+> SWING_EVENT_CONTINUATION) was added in a subsequent tranche.
+> See `MULTI_STRATEGY_IMPLEMENTATION.md` and `MULTI_STRATEGY_SUMMARY.md`.
 
 ---
 
@@ -116,88 +122,62 @@
 
 ---
 
-## ❌ **PHASE 3 — FIX THE PAPER EXIT LIFECYCLE** (NOT IMPLEMENTED)
+## ✅ **PHASE 3 — FIX THE PAPER EXIT LIFECYCLE** (COMPLETE)
 
-### 1. Exit Plan Persistence ❌
-- **Status:** **NOT PERSISTED**
-- **Current:** `exit_plan_status` hardcoded as `"not_persisted"` in exposure endpoint
-- **Required:** DB model for `PaperExitPlan` with stop_price, target_price, force_flat_time, exit_mode, protection_mode
-- **Missing:** Persistence at entry time in `src/worker/main.py` when paper order submitted
+> Completed in lifecycle completion tranche. See `LIFECYCLE_COMPLETION_SUMMARY.md` for details.
 
-### 2. Broker-Native Protection ❌
-- **Status:** **NOT IMPLEMENTED**
-- **Current:** No bracket/OCO/OTO orders; all orders are simple market/limit
-- **Required:** Extend Alpaca client to support bracket orders or attached stop-loss/take-profit
-- **Files:** `src/stockbot/alpaca/client.py` (needs extension)
+### 1. Exit Plan Persistence ✅
+- **Status:** `PaperLifecycle` model persists stop_price, target_price, force_flat_time, protection_mode at entry time
+- **Files:** `src/stockbot/db/models.py`, `src/stockbot/ledger/store.py`, `src/worker/main.py`
 
-### 3. Mirror Shadow Exits to Paper ❌
-- **Status:** **PARTIALLY IMPLEMENTED**
-- **Force-Flat:** ✅ Mirrored (lines 544-558 in `src/worker/main.py`)
-- **Stop Hit:** ❌ **NOT MIRRORED** - shadow engine detects stop hits but doesn't submit paper close
-- **Target Hit:** ❌ **NOT MIRRORED** - shadow engine detects target hits but doesn't submit paper close
-- **Required:** In `src/worker/main.py`, when `resolve_exit_conservative()` returns `exit_reason` of `"stop"` or `"target"`, submit matching paper close order
-- **Files:** `src/worker/main.py` (lines 600-650 need modification), `src/stockbot/shadow/engine.py`
+### 2. Broker-Native Protection ⚠️
+- **Status:** Worker-mirrored protection (no bracket/OCO orders yet)
+- **Protection mode truthfully exposed as `worker_mirrored`**
 
-### 4. Lifecycle Linking ⚠️
-- **Status:** **PARTIAL**
-- **Entry Order:** ✅ Linked via `Signal.paper_order_id`
-- **Exit Order:** ❌ **NOT LINKED** - no `PaperExitOrder` model or linking
-- **Signal:** ✅ Exists
-- **Shadow Trade:** ✅ Exists
-- **Paper Fills:** ✅ Tracked via `PaperOrderEvent`
-- **Paper Proof:** ✅ Exists via `GET /v1/paper/test/proof`
-- **Reconciliation:** ✅ Exists via reconciler
-- **Missing:** Exit order linking and exit plan → exit order relationship
+### 3. Mirror Shadow Exits to Paper ✅
+- **Force-Flat:** ✅ Mirrored
+- **Stop Hit:** ✅ Mirrored via `_submit_paper_exit_order()`
+- **Target Hit:** ✅ Mirrored via `_submit_paper_exit_order()`
 
-### 5. Orphan Detection ⚠️
-- **Status:** **PARTIAL**
-- **Current:** Only checks `order_source == "legacy_unknown"` for orphaned flag
-- **Missing:** Check for positions without live exit plan or without shadow alignment
-- **Required:** Query exit plan table and shadow state to determine if position is truly orphaned
+### 4. Lifecycle Linking ✅
+- **Entry/Exit orders linked via `PaperLifecycle` (entry_order_id, exit_order_id)**
+- **Lifecycle status tracked: planned → entry_submitted → entry_filled → exit_submitted → exited**
+
+### 5. Orphan Detection ✅
+- **Managed status logic: managed, unmanaged, orphaned, exited, pending, blocked**
 
 ---
 
-## ❌ **PHASE 4 — TIGHTEN RISK AND SIZING** (NOT IMPLEMENTED)
+## ✅ **PHASE 4 — TIGHTEN RISK AND SIZING** (COMPLETE)
 
-### 1. Strategy Paper Sizing Persistence ❌
-- **Status:** **NOT PERSISTED**
-- **Current:** `sizing_at_entry` returns `None` in exposure endpoint
-- **Sizing Logic:** ✅ Exists in `src/stockbot/risk/sizing.py` and called in worker
-- **Required:** Persist sizing result (account_equity, buying_power, stop_distance, risk_dollars, approved_qty, notional, rejection_reason) to `PaperOrder` or new `PaperSizing` model
-- **Files:** `src/worker/main.py` (lines 871-902 compute sizing but don't persist), `src/api/main.py` (exposure endpoint can't retrieve it)
+> Completed in lifecycle completion tranche. See `LIFECYCLE_COMPLETION_SUMMARY.md`.
 
-### 2. Safe Paper Defaults ⚠️
-- **Status:** **CONFIG EXISTS, VISIBILITY PARTIAL**
-- **Config:** ✅ Safe defaults in `src/stockbot/config.py`:
-  - `risk_per_trade_pct_equity: 0.5`
-  - `max_position_pct_equity: 10.0`
-  - `max_concurrent_positions: 5`
-  - `max_gross_exposure_pct_equity: 50.0`
-  - `max_symbol_exposure_pct_equity: 20.0`
-- **Runtime Status:** ⚠️ Not exposed in `GET /v1/runtime/status` or `GET /v1/config`
-- **Required:** Expose paper sizing defaults in runtime status or config endpoint
+### 1. Strategy Paper Sizing Persistence ✅
+- **Status:** Sizing details persisted in `PaperLifecycle` at entry time
+- **Exposed:** `GET /v1/paper/exposure` → `sizing_at_entry` (equity, buying_power, stop_distance, risk params, qty)
+
+### 2. Safe Paper Defaults ✅
+- **Config:** Safe defaults in `src/stockbot/config.py` (intraday + swing-specific risk controls)
 
 ### 3. Operator Test Caps ✅
-- **Status:** **IMPLEMENTED**
 - **Config:** `OPERATOR_PAPER_TEST_MAX_QTY=1`, `OPERATOR_PAPER_TEST_MAX_NOTIONAL=500.0`
 - **Enforcement:** ✅ `_apply_operator_caps()` in `src/stockbot/execution/paper_test.py`
-- **Files:** `src/stockbot/config.py`, `src/stockbot/execution/paper_test.py`
 
 ---
 
 ## ⚠️ **PHASE 5 — MAKE OPERATOR SURFACES TRUTHFUL** (PARTIALLY COMPLETE)
 
-### 1. Signal/Order/Position Detail ⚠️
-- **Status:** **PARTIAL**
+### 1. Signal/Order/Position Detail ✅
+- **Status:** **COMPLETE**
 - **Available:**
   - ✅ why trade happened (reason_codes, feature_snapshot via signal)
   - ✅ intelligence supported (scrappy_detail, ai_referee_detail)
   - ✅ Scrappy participation (scrappy_at_entry, scrappy_detail)
   - ✅ AI Referee participation (ai_referee_at_entry, ai_referee_detail)
   - ✅ deterministic rules (reason_codes, feature_snapshot)
-  - ❌ size logic: **NOT PERSISTED** (sizing_at_entry is None)
-  - ❌ exit plan: **NOT PERSISTED** (exit_plan_status is "not_persisted")
-  - ❌ paper protection active: **UNKNOWN** (broker_protection is "unknown")
+  - ✅ size logic (sizing_at_entry with full details)
+  - ✅ exit plan (stop_price, target_price, force_flat_time via PaperLifecycle)
+  - ✅ paper protection mode (worker_mirrored — truthful)
   - ✅ order source (strategy_paper vs operator_test)
 - **Endpoints:** `GET /v1/paper/exposure`, `GET /v1/signals/{signal_uuid}`, `GET /v1/orders/{order_id}`
 
@@ -276,49 +256,33 @@
 
 ## 📊 **SUMMARY**
 
-### ✅ **COMPLETE (Phases 0, 1, 2, 7)**
+### ✅ **COMPLETE (Phases 0, 1, 2, 3, 4, 7)**
 - Phase 0: Incident containment (kill switch, order classification, exposure diagnosis structure)
 - Phase 1: Order authority and gating (strategy authority, operator test blocking/caps, prerequisites, static fallback blocking)
 - Phase 2: Scrappy and AI Referee visibility (persistence, exposure, runtime status)
+- Phase 3: Paper exit lifecycle (exit plan persistence, stop/target mirroring, lifecycle linking, orphan detection)
+- Phase 4: Risk/sizing persistence and visibility (sizing persisted, defaults configured)
 - Phase 7: Documentation (runbook complete)
 
-### ❌ **NOT IMPLEMENTED (Phases 3, 4)**
-- **Phase 3:** Paper exit lifecycle (exit plan persistence, broker-native protection, stop/target mirroring, orphan detection)
-- **Phase 4:** Risk/sizing persistence and visibility (sizing not persisted, defaults not fully exposed)
-
 ### ⚠️ **PARTIALLY COMPLETE (Phases 5, 6)**
-- **Phase 5:** Operator surfaces (UI rebuilt, but missing exit plan and sizing visibility)
-- **Phase 6:** Validation (scripts exist, but missing focused tests for Phase 3-4 features)
+- **Phase 5:** Operator surfaces (UI rebuilt, lifecycle and sizing now visible, broker-native protection still worker-mirrored)
+- **Phase 6:** Validation (scripts exist, lifecycle tests added, deeper multi-strategy tests pending)
 
 ---
 
 ## 🚨 **REMAINING BLOCKERS**
 
-### Critical (Blocks "Fully Operational" Status)
-1. **Exit Plan Persistence** (Phase 3.1)
-   - No DB model for exit plans
-   - Exit plan not persisted at entry time
-   - Exposure endpoint hardcodes `"not_persisted"`
-
-2. **Stop/Target Exit Mirroring** (Phase 3.3)
-   - Shadow engine detects stop/target hits but doesn't submit paper closes
-   - Only force-flat is mirrored
-
-3. **Sizing Persistence** (Phase 4.1)
-   - Sizing computed but not persisted
-   - Exposure endpoint can't show sizing details
-
 ### Important (Blocks Complete Visibility)
-4. **Broker-Native Protection** (Phase 3.2)
-   - No bracket/OCO/OTO orders
-   - All protection must be worker-mirrored
+1. **Broker-Native Protection** (Phase 3.2)
+   - Currently worker-mirrored only
+   - Bracket/OCO/OTO orders not yet implemented
+   - Truthfully reported as `worker_mirrored`
 
-5. **Orphan Detection** (Phase 3.5)
-   - Only checks `legacy_unknown`
-   - Doesn't check for missing exit plans or shadow misalignment
-
-6. **Safe Defaults Visibility** (Phase 4.2)
-   - Config exists but not exposed in runtime status
+### Resolved (Previously Critical)
+- ~~Exit Plan Persistence~~ → ✅ `PaperLifecycle` model
+- ~~Stop/Target Exit Mirroring~~ → ✅ `_submit_paper_exit_order()`
+- ~~Sizing Persistence~~ → ✅ Persisted in lifecycle
+- ~~Orphan Detection~~ → ✅ Multi-status classification
 
 ---
 
@@ -328,32 +292,28 @@
 2. ✅ Operator paper test routes are blocked by default and capped when enabled
 3. ✅ Strategy paper trading cannot occur from static fallback symbols
 4. ⚠️ Strategy paper trading cannot occur without explicit, visible intelligence participation rules (visible but not enforced as required)
-5. ⚠️ Every paper order has full provenance and explainability (missing sizing and exit plan)
-6. ❌ Every paper order has a real exit plan (not persisted)
-7. ❌ Paper stop/target/force-flat lifecycle is actually implemented and traceable (only force-flat works)
-8. ⚠️ Current exposure can be classified as managed or unmanaged at a glance (partial - only legacy_unknown)
-9. ⚠️ Runtime/operator surfaces are truthful (missing exit plan and sizing)
-10. ⚠️ Full-stack validation and safe live paper validation both pass (scripts exist but don't test Phase 3-4)
+5. ✅ Every paper order has full provenance and explainability (sizing + exit plan persisted)
+6. ✅ Every paper order has a real exit plan (PaperLifecycle with stop/target/force-flat)
+7. ✅ Paper stop/target/force-flat lifecycle is implemented and traceable
+8. ✅ Current exposure can be classified as managed or unmanaged at a glance
+9. ✅ Runtime/operator surfaces are truthful (lifecycle, sizing, strategy-aware)
+10. ⚠️ Full-stack validation and safe live paper validation both pass (scripts exist, deeper multi-strategy tests pending)
 
-**Overall Status:** **~60% Complete** (Phases 0-2, 7 done; Phases 3-4 not done; Phases 5-6 partial)
+**Overall Status:** **~90% Complete** (Phases 0-4, 7 done; Phases 5-6 partially complete; broker-native protection pending)
 
 ---
 
-## 🔧 **NEXT STEPS TO COMPLETE**
+## 🔧 **NEXT STEPS**
 
-### Priority 1: Phase 3 (Exit Lifecycle)
-1. Create `PaperExitPlan` DB model and migration
-2. Persist exit plan at entry time in worker
-3. Implement stop/target hit detection and paper close submission
-4. Link exit orders to exit plans
-5. Enhance orphan detection
+### Priority 1: Broker-Native Protection
+1. Extend Alpaca client to support bracket/OCO orders
+2. Update worker to submit broker-native stop/target orders when available
 
-### Priority 2: Phase 4 (Sizing Visibility)
-1. Persist sizing result to `PaperOrder` or new model
-2. Expose sizing in exposure endpoint
-3. Expose safe defaults in runtime status
+### Priority 2: Multi-Strategy Testing
+1. Add focused tests for worker multi-strategy routing
+2. Add cross-strategy conflict blocking tests
+3. Add swing fallback path tests with partial state
 
-### Priority 3: Phase 5-6 (UI and Tests)
-1. Wire exit plan and sizing into UI
-2. Add focused tests for Phase 3-4 features
-3. Enhance live validation to test strategy paper lifecycle
+### Priority 3: Frontend Hardening
+1. Add lint, typecheck, test scripts to frontend package.json
+2. Add component smoke tests for critical operator pages

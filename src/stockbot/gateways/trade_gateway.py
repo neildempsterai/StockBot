@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from stockbot.alpaca.trading_stream import TradingStreamClient
-from stockbot.db.models import PaperOrder, PaperOrderEvent
+from stockbot.db.models import PaperOrder, PaperOrderEvent, Signal
 from stockbot.db.session import get_session_factory
 from stockbot.ledger.events import FillEvent
 from stockbot.ledger.store import LedgerStore
@@ -154,6 +154,18 @@ async def handle_trade_update(update) -> None:  # noqa: ANN001
             signal_uuid = UUID(update.client_order_id)
         except (ValueError, TypeError):
             signal_uuid = UUID(int=0)
+        _strategy_id = ""
+        _strategy_version = ""
+        if signal_uuid.int != 0:
+            sig_row = await session.execute(
+                select(Signal.strategy_id, Signal.strategy_version)
+                .where(Signal.signal_uuid == signal_uuid)
+                .limit(1)
+            )
+            sig = sig_row.first()
+            if sig:
+                _strategy_id = sig.strategy_id or ""
+                _strategy_version = sig.strategy_version or ""
         fill_event = FillEvent(
             signal_uuid=signal_uuid,
             client_order_id=update.client_order_id,
@@ -171,8 +183,8 @@ async def handle_trade_update(update) -> None:  # noqa: ANN001
             last=None,
             spread_bps=None,
             latency_ms=None,
-            strategy_id="",
-            strategy_version="",
+            strategy_id=_strategy_id,
+            strategy_version=_strategy_version,
         )
         await store.insert_fill(fill_event)
 

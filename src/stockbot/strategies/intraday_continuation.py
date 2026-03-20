@@ -61,28 +61,8 @@ class EvalResult:
     reject_reason: str | None
 
 
-def _et_time_in_range(ts: datetime, start_et: str, end_et: str) -> bool:
-    """True if ts (UTC) falls within start_et--end_et in America/New_York."""
-    try:
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
-        local = ts.astimezone(et)
-        t_str = local.strftime("%H:%M")
-        return start_et <= t_str <= end_et
-    except Exception:
-        return False
-
-
-def _et_time_after(ts: datetime, et_time: str) -> bool:
-    """True if ts (UTC) is at or after et_time in America/New_York."""
-    try:
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
-        local = ts.astimezone(et)
-        t_str = local.strftime("%H:%M")
-        return t_str >= et_time
-    except Exception:
-        return False
+from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402
+from stockbot.market_sessions import et_time_after as _et_time_after  # noqa: E402
 
 
 def _compute_session_extremes(bars: list) -> tuple[Decimal | None, Decimal | None]:

@@ -39,9 +39,9 @@ oauth = [
 ]
 
 [project.scripts]
-alpaca_market_gateway = "alpaca_market_gateway.main:main"
-alpaca_trade_gateway = "alpaca_trade_gateway.main:main"
-alpaca_reconciler = "alpaca_reconciler.main:main"
+alpaca_market_gateway = "stockbot.gateways.market_gateway:main"
+alpaca_trade_gateway = "stockbot.gateways.trade_gateway:main"
+alpaca_reconciler = "stockbot.gateways.reconciler:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,9 +1,12 @@
 """
-Worker: INTRA_EVENT_MOMO / 0.1.0 end-to-end strategy runtime.
+Worker: multi-strategy runtime (INTRA_EVENT_MOMO, OPEN_DRIVE_MOMO,
+INTRADAY_CONTINUATION, SWING_EVENT_CONTINUATION).
 Consumes Redis streams (bars, quotes, trades, news), maintains per-symbol state,
 evaluates on completed minute bars, persists signals and shadow trades.
-Shadow-only by default; when EXECUTION_MODE=paper and PAPER_EXECUTION_ENABLED=true, places paper orders.
-One trade max per symbol per day. Force flat by 15:45 ET (shadow close + paper close when paper mode).
+Shadow-only by default; when EXECUTION_MODE=paper and per-strategy paper flags
+are enabled, places paper orders.  Per-strategy trade tracking per symbol per day.
+Intraday strategies force flat by configured ET time; swing strategies support
+multi-day holds with overnight carry.
 """
 from __future__ import annotations
 
@@ -305,15 +308,14 @@ def scrappy_gate_check(
 
 
 def _et_time_after(ts: datetime, et_time: str) -> bool:
-    """True if ts (UTC) is at or after et_time in America/New_York."""
-    try:
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
-        local = ts.astimezone(et)
-        t_str = local.strftime("%H:%M")
-        return t_str >= et_time
-    except Exception:
-        return False
+    """True if ts (UTC) is at or after et_time in America/New_York.
+
+    Delegates to the canonical implementation in market_sessions.
+    """
+    from stockbot.market_sessions import et_time_after
+    return et_time_after(ts, et_time)
+
+
 
 
 async def _evaluate_symbol_with_strategy(
@@ -413,8 +415,11 @@ async def _evaluate_symbol_with_strategy(
         _swing_ask = (features.latest_ask if features else None) or sym_state.latest_ask
         _swing_last = (features.latest_last if features else None) or sym_state.latest_last
         _swing_minute_close = (features.latest_minute_close if features else None) or (last_bar.close if last_bar else None)
-        _swing_spread_bps = (features.spread_bps if features else None) or sym_state.spread_bps or 0
-        _swing_vwap = (features.session_vwap if features else None) or sym_state.vwap
+        _swing_spread_bps = (features.spread_bps if features else None)
+        if _swing_spread_bps is None and sym_state.latest_bid and sym_state.latest_ask and sym_state.latest_ask > 0:
+            _swing_spread_bps = int((sym_state.latest_ask - sym_state.latest_bid) / sym_state.latest_ask * 10000)
+        _swing_spread_bps = _swing_spread_bps or 0
+        _swing_vwap = (features.session_vwap if features else None) or sym_state.session_vwap()
         _swing_ts = (features.ts if features else None) or (last_bar.timestamp if last_bar else datetime.now(UTC))
         _swing_rel_volume = (features.rel_volume_5m if features else None) or Decimal("1.0")
         _swing_prev_close_fallback = (features.prev_close if features else None) or sym_state.prev_close

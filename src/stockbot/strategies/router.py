@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from stockbot.market_sessions import current_session
+from stockbot.market_sessions import current_session, et_time_in_range
 
 
 @dataclass
@@ -25,18 +25,6 @@ class StrategyConfig:
     max_hold_days: int = 0  # 0 = intraday (close same day)
 
 
-def _et_time_in_range(ts: datetime, start_et: str, end_et: str) -> bool:
-    """True if ts (UTC) falls within start_et--end_et in America/New_York."""
-    try:
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
-        local = ts.astimezone(et)
-        t_str = local.strftime("%H:%M")
-        return start_et <= t_str <= end_et
-    except Exception:
-        return False
-
-
 def get_active_strategies(ts: datetime, configs: list[StrategyConfig]) -> list[StrategyConfig]:
     """
     Return list of strategies that are currently active (within entry window and enabled).
@@ -45,7 +33,7 @@ def get_active_strategies(ts: datetime, configs: list[StrategyConfig]) -> list[S
     for config in configs:
         if not config.enabled:
             continue
-        if _et_time_in_range(ts, config.entry_start_et, config.entry_end_et):
+        if et_time_in_range(ts, config.entry_start_et, config.entry_end_et):
             active.append(config)
     return active
 
@@ -87,7 +75,7 @@ def should_evaluate_strategy(
     if not config.enabled:
         return (False, "strategy_disabled")
     
-    if not _et_time_in_range(ts, config.entry_start_et, config.entry_end_et):
+    if not et_time_in_range(ts, config.entry_start_et, config.entry_end_et):
         return (False, "outside_entry_window")
     
     # Check if symbol already traded by this strategy today

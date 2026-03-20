@@ -92,3 +92,34 @@ def session_allows_scanner(session: SessionLabel, premarket_ok: bool, regular_ok
     if session in ("overnight", "closed"):
         return overnight_ok
     return False
+
+
+def et_time_in_range(ts: datetime, start_et: str, end_et: str) -> bool:
+    """True if ts (UTC) falls within start_et--end_et in America/New_York.
+
+    start_et / end_et are "HH:MM" strings in ET.  This is the single canonical
+    implementation — all strategy modules and the worker should call this instead
+    of maintaining their own copies.
+    """
+    try:
+        import zoneinfo
+        et = ts.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+        sh, sm = map(int, start_et.split(":"))
+        eh, em = map(int, end_et.split(":"))
+        return (sh, sm) <= (et.hour, et.minute) < (eh, em)
+    except Exception:
+        return False
+
+
+def et_time_after(ts: datetime, et_time: str) -> bool:
+    """True if ts (UTC) is at or after et_time in America/New_York.
+
+    et_time is an "HH:MM" string in ET.
+    """
+    try:
+        import zoneinfo
+        et = ts.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+        h, m = map(int, et_time.split(":"))
+        return (et.hour, et.minute) >= (h, m)
+    except Exception:
+        return False

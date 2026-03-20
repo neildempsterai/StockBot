@@ -110,15 +110,7 @@ class SwingEvalResult:
     reject_reason: str | None
 
 
-def _et_time_in_range(ts: datetime, start_et: str, end_et: str) -> bool:
-    try:
-        import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
-        local = ts.astimezone(et)
-        t_str = local.strftime("%H:%M")
-        return start_et <= t_str <= end_et
-    except Exception:
-        return False
+from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402
 
 
 def compute_close_position_in_range_pct(
