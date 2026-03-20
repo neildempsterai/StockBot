@@ -323,6 +323,9 @@ async def run_market_gateway() -> None:
 
         try:
             await stream.run()
+        except Exception as e:
+            # Log connection errors but don't crash - let the loop reconnect
+            logger.warning("market_gateway stream connection error: %s (reconnecting)", e)
         finally:
             refresh_task.cancel()
             heartbeat_task.cancel()
