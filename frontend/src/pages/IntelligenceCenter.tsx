@@ -383,20 +383,16 @@ export function IntelligenceCenter() {
             const scannerActive = scannerLive;
             
             let aliveStatus = 'not_running';
-            let aliveClass = 'pnl--negative';
             let aliveMessage = 'Premarket not running';
             
             if (scannerActive && hasFocusSymbols && scrappyRecent && hasFreshResearch) {
               aliveStatus = 'alive';
-              aliveClass = 'pnl--positive';
               aliveMessage = 'Premarket alive: Scanner active, focus symbols identified, fresh research coverage';
             } else if (scannerActive && hasFocusSymbols && (scrappyRecent || !scrappyStatus?.last_run_at)) {
               aliveStatus = 'degraded';
-              aliveClass = 'pnl--negative';
               aliveMessage = 'Premarket degraded: Scanner active but research coverage missing or stale';
             } else if (scannerActive) {
               aliveStatus = 'partial';
-              aliveClass = '';
               aliveMessage = 'Premarket partial: Scanner active but no focus symbols or research yet';
             }
             
