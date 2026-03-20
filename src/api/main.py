@@ -1041,31 +1041,34 @@ async def paper_exposure() -> dict:
             elif order_source == "legacy_unknown":
                 managed_status = "orphaned"
             # Extract P&L data from Alpaca position
+            # Alpaca returns these as strings, handle None, empty string, and numeric strings
             unrealized_pl = p.get("unrealized_pl")
             unrealized_plpc = p.get("unrealized_plpc")
             market_value = p.get("market_value")
             current_price = p.get("current_price")
             avg_entry_price = p.get("avg_entry_price")
-            try:
-                unrealized_pl_float = float(unrealized_pl) if unrealized_pl is not None else None
-            except (TypeError, ValueError):
-                unrealized_pl_float = None
-            try:
-                unrealized_plpc_float = float(unrealized_plpc) if unrealized_plpc is not None else None
-            except (TypeError, ValueError):
-                unrealized_plpc_float = None
-            try:
-                market_value_float = float(market_value) if market_value is not None else None
-            except (TypeError, ValueError):
-                market_value_float = None
-            try:
-                current_price_float = float(current_price) if current_price is not None else None
-            except (TypeError, ValueError):
-                current_price_float = None
-            try:
-                avg_entry_price_float = float(avg_entry_price) if avg_entry_price is not None else None
-            except (TypeError, ValueError):
-                avg_entry_price_float = None
+            
+            # Convert to float, handling None, empty strings, and already-numeric values
+            def safe_float(val):
+                if val is None:
+                    return None
+                if isinstance(val, (int, float)):
+                    return float(val)
+                if isinstance(val, str):
+                    val = val.strip()
+                    if val == "" or val.lower() == "none" or val.lower() == "null":
+                        return None
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return None
+                return None
+            
+            unrealized_pl_float = safe_float(unrealized_pl)
+            unrealized_plpc_float = safe_float(unrealized_plpc)
+            market_value_float = safe_float(market_value)
+            current_price_float = safe_float(current_price)
+            avg_entry_price_float = safe_float(avg_entry_price)
             exposure.append({
                 "symbol": symbol,
                 "side": side,
