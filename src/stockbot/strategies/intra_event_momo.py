@@ -18,13 +18,23 @@ STRATEGY_ID = "INTRA_EVENT_MOMO"
 STRATEGY_VERSION = "0.1.0"
 
 POSITIVE_KEYWORDS = [
-    "beat", "beats", "raise", "raises", "raised", "guidance", "approved", "approval",
-    "partnership", "contract", "buyback", "upgrade",
+    "beat expectations", "beats expectations", "beat estimates", "beats estimates",
+    "raise guidance", "raises guidance", "raised guidance", "raised outlook",
+    "fda approved", "fda approval", "approval", "approved",
+    "partnership", "strategic partnership", "buyback", "share repurchase",
+    "upgrade", "upgraded", "price target raised", "outperform",
+    "revenue beat", "earnings beat", "strong results", "record revenue",
 ]
 NEGATIVE_KEYWORDS = [
-    "miss", "misses", "cut", "cuts", "lowered", "downgrade", "offering", "investigation",
-    "probe", "delay", "delayed", "lawsuit",
+    "missed expectations", "misses expectations", "missed estimates", "misses estimates",
+    "cut guidance", "cuts guidance", "lowered guidance", "lowered outlook",
+    "downgrade", "downgraded", "price target cut", "price target lowered",
+    "secondary offering", "share offering", "stock offering",
+    "investigation", "probe", "sec probe", "sec investigation",
+    "delay", "delayed", "lawsuit", "class action",
+    "revenue miss", "earnings miss", "weak results", "disappointing",
 ]
+NEGATION_WORDS = ["not", "no", "doesn't", "didn't", "won't", "isn't", "wasn't", "never", "unlikely"]
 
 # Candidate filters
 MIN_PRICE = Decimal("5")
@@ -56,13 +66,37 @@ def _parse_news_published(ts: Any) -> datetime | None:
     return None
 
 
+def _keyword_match_with_negation(text_lower: str, keyword: str) -> bool:
+    """Match keyword in text, rejecting if preceded by a negation word in the same clause.
+
+    Clause boundaries: commas, semicolons, periods, colons, "but", "however".
+    Only looks at the 3 words immediately before the keyword within the same clause.
+    """
+    import re
+    idx = text_lower.find(keyword)
+    while idx != -1:
+        preceding_text = text_lower[max(0, idx - 60):idx]
+        clause_breaks = list(re.finditer(r"[,;.:]|\bbut\b|\bhowever\b", preceding_text))
+        if clause_breaks:
+            last_break = clause_breaks[-1].end()
+            same_clause = preceding_text[last_break:]
+        else:
+            same_clause = preceding_text
+        words = same_clause.split()[-5:]
+        negated = any(w.rstrip(",.;:") in NEGATION_WORDS for w in words)
+        if not negated:
+            return True
+        idx = text_lower.find(keyword, idx + 1)
+    return False
+
+
 def classify_news_side(
     news_items: list[NewsItem],
     within_minutes: int = 60,
     reference_ts: datetime | None = None,
 ) -> str:
     """
-    Deterministic rule-based classifier.
+    Deterministic rule-based classifier with phrase matching and negation awareness.
     Only consider news published within last within_minutes of reference_ts (or now if None).
     Returns: 'long' | 'short' | 'neutral'
     """
@@ -76,14 +110,20 @@ def classify_news_side(
             continue
         text = (n.headline or "") + " " + (n.summary or "")
         text_lower = text.lower()
+        has_pos = False
+        has_neg = False
         for kw in POSITIVE_KEYWORDS:
-            if kw in text_lower:
-                positive_hits += 1
+            if _keyword_match_with_negation(text_lower, kw):
+                has_pos = True
                 break
         for kw in NEGATIVE_KEYWORDS:
-            if kw in text_lower:
-                negative_hits += 1
+            if _keyword_match_with_negation(text_lower, kw):
+                has_neg = True
                 break
+        if has_pos and not has_neg:
+            positive_hits += 1
+        elif has_neg and not has_pos:
+            negative_hits += 1
     if positive_hits > 0 and negative_hits == 0:
         return "long"
     if negative_hits > 0 and positive_hits == 0:
@@ -92,15 +132,15 @@ def classify_news_side(
 
 
 def news_keyword_hits(text: str) -> tuple[list[str], list[str]]:
-    """Return (positive_matched, negative_matched) for given text."""
+    """Return (positive_matched, negative_matched) for given text with negation awareness."""
     text_lower = (text or "").lower()
     pos: list[str] = []
     neg: list[str] = []
     for kw in POSITIVE_KEYWORDS:
-        if kw in text_lower:
+        if _keyword_match_with_negation(text_lower, kw):
             pos.append(kw)
     for kw in NEGATIVE_KEYWORDS:
-        if kw in text_lower:
+        if _keyword_match_with_negation(text_lower, kw):
             neg.append(kw)
     return (pos, neg)
 
@@ -134,14 +174,7 @@ def compute_gap_pct(prev_close: Decimal, current: Decimal) -> Decimal:
     return ((current - prev_close) / prev_close * 100).quantize(Decimal("0.01"))
 
 
-@dataclass
-class EvalResult:
-    """Result of strategy evaluation: no signal, or long/short with reason codes."""
-    side: str | None  # None | "buy" | "sell"
-    reason_codes: list[str]
-    feature_snapshot: dict[str, Any]
-    passes_filters: bool
-    reject_reason: str | None
+from stockbot.strategies.types import EvalResult  # noqa: E402
 
 
 from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402

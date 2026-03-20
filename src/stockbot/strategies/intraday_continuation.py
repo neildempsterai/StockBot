@@ -36,8 +36,12 @@ MIN_REL_VOLUME_5M = Decimal("1.2")  # Lower relative volume requirement
 
 # Continuation-specific thresholds
 MAX_VWAP_DISTANCE_PCT = Decimal("3.0")  # Price should not be too far from VWAP
-MIN_PULLBACK_DEPTH_PCT = Decimal("0.5")  # Minimum pullback from session high/low
-MAX_PULLBACK_DEPTH_PCT = Decimal("5.0")  # Maximum pullback (too deep = trend broken)
+# Consolidation: price near session extreme after having held direction
+CONSOLIDATION_FROM_HIGH_PCT = Decimal("1.5")  # Within 1.5% of session high = consolidating near highs
+CONSOLIDATION_FROM_LOW_PCT = Decimal("1.5")  # Within 1.5% of session low = consolidating near lows
+# Reclaim: price crossed back above VWAP after a deeper pullback
+MIN_RECLAIM_PULLBACK_PCT = Decimal("1.0")  # Must have pulled back at least 1% to call it a reclaim
+MAX_RECLAIM_PULLBACK_PCT = Decimal("5.0")  # More than 5% pullback = trend likely broken
 
 
 @dataclass
@@ -51,14 +55,7 @@ class FeatureSet(BaseFeatureSet):
     vwap_distance_pct: Decimal | None = None  # % distance from VWAP
 
 
-@dataclass
-class EvalResult:
-    """Result of strategy evaluation: no signal, or long/short with reason codes."""
-    side: str | None  # None | "buy" | "sell"
-    reason_codes: list[str]
-    feature_snapshot: dict[str, Any]
-    passes_filters: bool
-    reject_reason: str | None
+from stockbot.strategies.types import EvalResult  # noqa: E402
 
 
 from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402
@@ -193,51 +190,51 @@ def evaluate(
 
     close = features.latest_minute_close or price
 
-    # Long continuation: price pulled back from session high, now reclaiming
-    # News should be long or neutral (not short)
-    if features.news_side != "short":
-        # Check for pullback then reclaim
+    # --- LONG CONTINUATION ---
+    # Two patterns: (A) consolidation near session highs, (B) VWAP reclaim after pullback
+    if features.news_side != "short" and vwap is not None:
+        # Pattern A: Consolidation near highs — price within 1.5% of session high, above VWAP
+        if pullback_from_high is not None and pullback_from_high <= CONSOLIDATION_FROM_HIGH_PCT:
+            if close > vwap:
+                reason_codes.extend(["continuation_long", "consolidation_near_highs", "above_vwap"])
+                if features.news_side == "long":
+                    reason_codes.append("news_long")
+                snapshot["signal_reason_codes"] = reason_codes
+                return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
+
+        # Pattern B: VWAP reclaim — pulled back 1-5% from high, now crossing back above VWAP
         if pullback_from_high is not None:
-            if MIN_PULLBACK_DEPTH_PCT <= pullback_from_high <= MAX_PULLBACK_DEPTH_PCT:
-                # Price has pulled back from high, check for reclaim
-                if close > session_high * Decimal("0.995"):  # Reclaiming within 0.5% of session high
-                    if vwap is not None and price > vwap * Decimal("0.998"):  # Near or above VWAP
-                        reason_codes.extend(["continuation_long", "reclaim_session_high", "above_vwap"])
-                        if features.news_side == "long":
-                            reason_codes.append("news_long")
-                        snapshot["signal_reason_codes"] = reason_codes
-                        return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-                # Or check for VWAP reclaim after pullback
-                if vwap is not None and close > vwap and pullback_from_high <= Decimal("2.0"):
-                    reason_codes.extend(["continuation_long", "vwap_reclaim", "pullback_from_high"])
+            if MIN_RECLAIM_PULLBACK_PCT <= pullback_from_high <= MAX_RECLAIM_PULLBACK_PCT:
+                if close > vwap and price > vwap:
+                    reason_codes.extend(["continuation_long", "vwap_reclaim_after_pullback"])
+                    reason_codes.append(f"pullback_{pullback_from_high}pct")
                     if features.news_side == "long":
                         reason_codes.append("news_long")
                     snapshot["signal_reason_codes"] = reason_codes
                     return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
 
-    # Short continuation: price pulled back from session low, now breaking down further
-    # News should be short or neutral (not long)
-    if features.news_side != "long":
-        # Check for pullback then breakdown
+    # --- SHORT CONTINUATION ---
+    if features.news_side != "long" and vwap is not None:
+        # Pattern A: Consolidation near lows — price within 1.5% of session low, below VWAP
+        if pullback_from_low is not None and pullback_from_low <= CONSOLIDATION_FROM_LOW_PCT:
+            if close < vwap:
+                reason_codes.extend(["continuation_short", "consolidation_near_lows", "below_vwap"])
+                if features.news_side == "short":
+                    reason_codes.append("news_short")
+                snapshot["signal_reason_codes"] = reason_codes
+                return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
+
+        # Pattern B: VWAP breakdown — pulled back 1-5% from low, now crossing below VWAP
         if pullback_from_low is not None:
-            if MIN_PULLBACK_DEPTH_PCT <= pullback_from_low <= MAX_PULLBACK_DEPTH_PCT:
-                # Price has pulled back from low, check for breakdown
-                if close < session_low * Decimal("1.005"):  # Breaking down within 0.5% of session low
-                    if vwap is not None and price < vwap * Decimal("1.002"):  # Near or below VWAP
-                        reason_codes.extend(["continuation_short", "breakdown_session_low", "below_vwap"])
-                        if features.news_side == "short":
-                            reason_codes.append("news_short")
-                        snapshot["signal_reason_codes"] = reason_codes
-                        return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-                # Or check for VWAP breakdown after pullback
-                if vwap is not None and close < vwap and pullback_from_low <= Decimal("2.0"):
-                    reason_codes.extend(["continuation_short", "vwap_breakdown", "pullback_from_low"])
+            if MIN_RECLAIM_PULLBACK_PCT <= pullback_from_low <= MAX_RECLAIM_PULLBACK_PCT:
+                if close < vwap and price < vwap:
+                    reason_codes.extend(["continuation_short", "vwap_breakdown_after_pullback"])
+                    reason_codes.append(f"pullback_{pullback_from_low}pct")
                     if features.news_side == "short":
                         reason_codes.append("news_short")
                     snapshot["signal_reason_codes"] = reason_codes
                     return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
 
-    # No continuation signal
     return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="continuation_conditions_not_met")
 
 

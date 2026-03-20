@@ -100,14 +100,7 @@ class SwingFeatureSet:
     signal_reason_codes: list[str] = field(default_factory=list)
 
 
-@dataclass
-class SwingEvalResult:
-    """Result of swing strategy evaluation."""
-    side: str | None
-    reason_codes: list[str]
-    feature_snapshot: dict[str, Any]
-    passes_filters: bool
-    reject_reason: str | None
+from stockbot.strategies.types import EvalResult as SwingEvalResult  # noqa: E402
 
 
 from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402

@@ -330,7 +330,7 @@ async def _evaluate_symbol_with_strategy(
     scrappy_mode: str,
     news_side: str,
     keyword_hits: list[str],
-    features: FeatureSet,
+    features: FeatureSet | None,
     last_bar: BarLike,
 ) -> bool:
     """
@@ -348,12 +348,17 @@ async def _evaluate_symbol_with_strategy(
     if strategy_traded_key in traded:
         return False
     
-    # Evaluate with appropriate strategy function
+    # Precompute shared values used across strategy branches
     eval_result = None
     or_high = features.opening_range_high if features else None
     or_low = features.opening_range_low if features else None
     vwap = features.session_vwap if features else None
-    
+    session_high_val: Decimal | None = max(b.high for b in sym_state.bars) if sym_state.bars else None
+    session_low_val: Decimal | None = min(b.low for b in sym_state.bars) if sym_state.bars else None
+    prev_low_daily: Decimal | None = None
+    prev_high_daily: Decimal | None = None
+    day_2_low_daily: Decimal | None = None
+
     if strategy_id == OPEN_DRIVE_MOMO_ID:
         eval_result = evaluate_open_drive_momo(
             features,
@@ -381,12 +386,7 @@ async def _evaluate_symbol_with_strategy(
             news_side=features.news_side,
             news_keyword_hits=features.news_keyword_hits,
         )
-        # Compute session extremes from bars
-        session_high_val = None
-        session_low_val = None
-        if sym_state.bars:
-            session_high_val = max(b.high for b in sym_state.bars)
-            session_low_val = min(b.low for b in sym_state.bars)
+        if session_high_val is not None and session_low_val is not None:
             continuation_features.session_high = session_high_val
             continuation_features.session_low = session_low_val
         eval_result = evaluate_intraday_continuation(
@@ -424,11 +424,7 @@ async def _evaluate_symbol_with_strategy(
         _swing_rel_volume = (features.rel_volume_5m if features else None) or Decimal("1.0")
         _swing_prev_close_fallback = (features.prev_close if features else None) or sym_state.prev_close
 
-        # Fetch daily bar context from Alpaca snapshot (prev_daily_bar)
         prev_close_daily = _swing_prev_close_fallback
-        prev_high_daily = None
-        prev_low_daily = None
-        day_2_low_daily = None
         avg_daily_dollar_vol = None
         try:
             from stockbot.alpaca.client import AlpacaClient
@@ -499,15 +495,8 @@ async def _evaluate_symbol_with_strategy(
             entry_start_et=strategy_config.entry_start_et,
             entry_end_et=strategy_config.entry_end_et,
         )
-        # Map SwingEvalResult to match the EvalResult interface used below
         if swing_eval.side is not None and swing_eval.passes_filters:
-            eval_result = type('EvalResult', (), {
-                'side': swing_eval.side,
-                'reason_codes': swing_eval.reason_codes,
-                'feature_snapshot': swing_eval.feature_snapshot,
-                'passes_filters': swing_eval.passes_filters,
-                'reject_reason': swing_eval.reject_reason,
-            })()
+            eval_result = swing_eval
         else:
             # Record rejection
             if swing_eval.reject_reason:
@@ -720,19 +709,14 @@ async def _evaluate_symbol_with_strategy(
     if strategy_id == OPEN_DRIVE_MOMO_ID:
         stop_price, target_price = exit_stop_target_open_drive_momo(eval_result.side, or_high, or_low, real_entry, 2.0)
     elif strategy_id == INTRADAY_CONTINUATION_ID:
-        session_high_val_final = session_high_val if 'session_high_val' in locals() else or_high
-        session_low_val_final = session_low_val if 'session_low_val' in locals() else or_low
         stop_price, target_price = exit_stop_target_intraday_continuation(
-            eval_result.side, real_entry, session_high_val_final, session_low_val_final, vwap, 2.0
+            eval_result.side, real_entry, session_high_val or or_high, session_low_val or or_low, vwap, 2.0
         )
     elif strategy_id == INTRA_EVENT_MOMO_ID:
         stop_price, target_price = exit_stop_target_intra_event_momo(eval_result.side, or_high, or_low, real_entry, 2.0)
     elif strategy_id == SWING_EVENT_CONTINUATION_ID:
-        _prev_low = prev_low_daily if 'prev_low_daily' in locals() else None
-        _day_2_low = day_2_low_daily if 'day_2_low_daily' in locals() else None
-        _prev_high = prev_high_daily if 'prev_high_daily' in locals() else None
         stop_price, target_price = compute_stop_target_swing(
-            eval_result.side, real_entry, _prev_low, _day_2_low, _prev_high,
+            eval_result.side, real_entry, prev_low_daily, day_2_low_daily, prev_high_daily,
         )
     else:
         if eval_result.side == "buy":
@@ -741,6 +725,17 @@ async def _evaluate_symbol_with_strategy(
         else:
             stop_price = real_entry * Decimal("1.02")
             target_price = real_entry * Decimal("0.98")
+
+    # Enforce minimum stop distance (0.3% of entry price)
+    min_stop_distance = real_entry * Decimal("0.003")
+    actual_stop_distance = abs(real_entry - stop_price)
+    if actual_stop_distance < min_stop_distance:
+        if eval_result.side == "buy":
+            stop_price = (real_entry - min_stop_distance).quantize(Decimal("0.01"))
+            target_price = (real_entry + min_stop_distance * Decimal("2")).quantize(Decimal("0.01"))
+        else:
+            stop_price = (real_entry + min_stop_distance).quantize(Decimal("0.01"))
+            target_price = (real_entry - min_stop_distance * Decimal("2")).quantize(Decimal("0.01"))
     
     # Paper execution logic (only if strategy allows paper)
     qty = Decimal("100")
@@ -1192,6 +1187,50 @@ async def run_worker() -> None:
     fee_per_share = Decimal(settings.shadow_fee_per_share)
     state: dict[str, SymbolState] = {sym: SymbolState(symbol=sym) for sym in universe}
     shadow_state = ShadowState()
+
+    # Recover open shadow positions from DB to avoid duplicates after restart
+    try:
+        import zoneinfo as _zi_recovery
+        _et_tz_r = _zi_recovery.ZoneInfo("America/New_York")
+        _today_et = datetime.now(UTC).astimezone(_et_tz_r)
+        _today_open = _today_et.replace(hour=4, minute=0, second=0, microsecond=0)
+        _since_utc = _today_open.astimezone(UTC)
+        factory_recovery = get_session_factory()
+        async with factory_recovery() as session_recovery:
+            store_recovery = LedgerStore(session_recovery)
+            open_signals = await store_recovery.get_open_shadow_signals(_since_utc)
+            for sig in open_signals:
+                if sig.symbol in universe_set:
+                    lc = await store_recovery.get_paper_lifecycle_by_signal_uuid(sig.signal_uuid)
+                    stop_p = lc.stop_price if lc else Decimal("0")
+                    target_p = lc.target_price if lc else Decimal("0")
+                    entry_p = lc.entry_price if lc else (sig.ask if sig.side == "buy" else sig.bid) or Decimal("0")
+                    hold_type = lc.holding_period_type if lc else "intraday"
+                    max_hd = lc.max_hold_days if lc else 0
+                    entry_d = lc.entry_date if lc else ""
+                    shadow_state.open_position(ShadowPosition(
+                        signal_uuid=sig.signal_uuid,
+                        symbol=sig.symbol,
+                        side=sig.side,
+                        qty=sig.qty,
+                        entry_ts=sig.quote_ts or sig.created_at,
+                        ideal_entry_price=entry_p,
+                        realistic_entry_price=entry_p,
+                        stop_price=stop_p,
+                        target_price=target_p,
+                        slippage_bps=slippage_bps,
+                        fee_per_share=fee_per_share,
+                        strategy_id=sig.strategy_id,
+                        holding_period_type=hold_type,
+                        max_hold_days=max_hd,
+                        entry_date=entry_d or "",
+                    ))
+            if open_signals:
+                recovered_symbols = [s.symbol for s in open_signals if s.symbol in universe_set]
+                logger.info("shadow_recovery recovered=%d symbols=%s", len(recovered_symbols), recovered_symbols)
+    except Exception as e:
+        logger.warning("shadow_recovery_failed error=%s", e)
+
     last_ids = await _load_last_ids(redis_client)
     event_counts: dict[str, int] = {"bars": 0, "quotes": 0, "trades": 0, "news": 0}
     last_heartbeat = 0.0
@@ -1574,7 +1613,7 @@ async def _on_bar(
         return
 
     close = last_bar.close
-    gap_pct = ((close - prev_close) / prev_close * 100).quantize(Decimal("0.01")) if prev_close and prev_close != 0 else Decimal("0")
+    gap_pct = sym_state.gap_pct()
     spread_bps = 0
     if sym_state.latest_bid and sym_state.latest_ask and sym_state.latest_ask > 0:
         spread_bps = int((sym_state.latest_ask - sym_state.latest_bid) / sym_state.latest_ask * 10000)

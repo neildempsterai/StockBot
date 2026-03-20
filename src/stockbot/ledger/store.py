@@ -365,3 +365,34 @@ class LedgerStore:
             q = q.where(PaperLifecycle.lifecycle_status == lifecycle_status)
         result = await self._session.execute(q)
         return list(result.scalars().all())
+
+    async def get_open_shadow_signals(self, since: datetime) -> list[Signal]:
+        """Find signals emitted since `since` that have no corresponding shadow trade exit.
+
+        Used for recovering open shadow positions after worker restart.
+        A signal is "open" if it exists in the signals table but has no
+        matching shadow_trade record with execution_mode='realistic'.
+        """
+        from sqlalchemy import and_, exists
+
+        exited_subquery = (
+            select(ShadowTrade.signal_uuid)
+            .where(
+                and_(
+                    ShadowTrade.signal_uuid == Signal.signal_uuid,
+                    ShadowTrade.execution_mode == "realistic",
+                )
+            )
+        )
+        q = (
+            select(Signal)
+            .where(
+                and_(
+                    Signal.created_at >= since,
+                    ~exists(exited_subquery),
+                )
+            )
+            .order_by(Signal.created_at.asc())
+        )
+        result = await self._session.execute(q)
+        return list(result.scalars().all())

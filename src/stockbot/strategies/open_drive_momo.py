@@ -18,14 +18,12 @@ FORCE_FLAT_ET = "15:45"
 STRATEGY_ID = "OPEN_DRIVE_MOMO"
 STRATEGY_VERSION = "0.1.0"
 
-POSITIVE_KEYWORDS = [
-    "beat", "beats", "raise", "raises", "raised", "guidance", "approved", "approval",
-    "partnership", "contract", "buyback", "upgrade",
-]
-NEGATIVE_KEYWORDS = [
-    "miss", "misses", "cut", "cuts", "lowered", "downgrade", "offering", "investigation",
-    "probe", "delay", "delayed", "lawsuit",
-]
+from stockbot.strategies.intra_event_momo import (
+    POSITIVE_KEYWORDS,
+    NEGATIVE_KEYWORDS,
+    NEGATION_WORDS,
+    _keyword_match_with_negation,
+)
 
 # Candidate filters
 MIN_PRICE = Decimal("5")
@@ -57,53 +55,10 @@ def _parse_news_published(ts: Any) -> datetime | None:
     return None
 
 
-def classify_news_side(
-    news_items: list[NewsItem],
-    within_minutes: int = 60,
-    reference_ts: datetime | None = None,
-) -> str:
-    """
-    Deterministic rule-based classifier.
-    Only consider news published within last within_minutes of reference_ts (or now if None).
-    Returns: 'long' | 'short' | 'neutral'
-    """
-    from datetime import timedelta
-    ref = reference_ts.replace(tzinfo=UTC) if reference_ts and reference_ts.tzinfo is None else (reference_ts or datetime.now(UTC))
-    cutoff = ref - timedelta(minutes=within_minutes)
-    positive_hits = 0
-    negative_hits = 0
-    for n in news_items:
-        if n.published_at and n.published_at < cutoff:
-            continue
-        text = (n.headline or "") + " " + (n.summary or "")
-        text_lower = text.lower()
-        for kw in POSITIVE_KEYWORDS:
-            if kw in text_lower:
-                positive_hits += 1
-                break
-        for kw in NEGATIVE_KEYWORDS:
-            if kw in text_lower:
-                negative_hits += 1
-                break
-    if positive_hits > 0 and negative_hits == 0:
-        return "long"
-    if negative_hits > 0 and positive_hits == 0:
-        return "short"
-    return "neutral"
-
-
-def news_keyword_hits(text: str) -> tuple[list[str], list[str]]:
-    """Return (positive_matched, negative_matched) for given text."""
-    text_lower = (text or "").lower()
-    pos: list[str] = []
-    neg: list[str] = []
-    for kw in POSITIVE_KEYWORDS:
-        if kw in text_lower:
-            pos.append(kw)
-    for kw in NEGATIVE_KEYWORDS:
-        if kw in text_lower:
-            neg.append(kw)
-    return (pos, neg)
+from stockbot.strategies.intra_event_momo import (  # noqa: E811
+    classify_news_side,
+    news_keyword_hits,
+)
 
 
 @dataclass
@@ -135,14 +90,7 @@ def compute_gap_pct(prev_close: Decimal, current: Decimal) -> Decimal:
     return ((current - prev_close) / prev_close * 100).quantize(Decimal("0.01"))
 
 
-@dataclass
-class EvalResult:
-    """Result of strategy evaluation: no signal, or long/short with reason codes."""
-    side: str | None  # None | "buy" | "sell"
-    reason_codes: list[str]
-    feature_snapshot: dict[str, Any]
-    passes_filters: bool
-    reject_reason: str | None
+from stockbot.strategies.types import EvalResult  # noqa: E402, E811
 
 
 from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402
