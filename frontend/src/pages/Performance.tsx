@@ -125,17 +125,12 @@ export function Performance() {
 
       {/* Paper Trading Section */}
       <SectionHeader title="Paper trading" subtitle="Real broker fills and live P&L" />
-      <div className="grid-cards grid-cards--5">
+      <div className="grid-cards grid-cards--4">
         <KPICard title="Paper fills" value={paperFills} />
         <KPICard
           title="Paper P&L"
           value={paperPnl !== 0 ? formatPnl(paperPnl) : '—'}
           valueClass={pnlClass(paperPnl)}
-        />
-        <KPICard
-          title="Realized P&L"
-          value={realizedPnl !== 0 ? formatPnl(realizedPnl) : '—'}
-          valueClass={pnlClass(realizedPnl)}
         />
         <KPICard
           title="Open positions"
