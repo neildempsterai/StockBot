@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { apiGet } from '../api/client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiGet, apiPost } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
 import type { 
   HealthDetailResponse, 
@@ -17,6 +17,130 @@ import { SectionHeader } from '../components/shared/SectionHeader';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
 import { StateBadge } from '../components/shared/StateBadge';
 import { formatTs, formatDateTime } from '../utils/format';
+
+function PaperTradingControls({ 
+  paperArmed, 
+  prerequisitesSatisfied, 
+  blockers 
+}: { 
+  paperArmed: boolean; 
+  prerequisitesSatisfied: boolean; 
+  blockers: string[];
+}) {
+  const queryClient = useQueryClient();
+  
+  const armMutation = useMutation({
+    mutationFn: () => apiPost<{ armed: boolean; message: string }>(ENDPOINTS.paperArm),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['runtimeStatus'] });
+      queryClient.invalidateQueries({ queryKey: ['paperArmingPrerequisites'] });
+    },
+  });
+  
+  const disarmMutation = useMutation({
+    mutationFn: () => apiPost<{ armed: boolean; message: string }>(ENDPOINTS.paperDisarm),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['runtimeStatus'] });
+      queryClient.invalidateQueries({ queryKey: ['paperArmingPrerequisites'] });
+    },
+  });
+  
+  const refreshPrerequisitesMutation = useMutation({
+    mutationFn: () => apiGet<PaperArmingPrerequisitesResponse>(ENDPOINTS.paperArmingPrerequisites),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['paperArmingPrerequisites'] });
+    },
+  });
+  
+  return (
+    <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: 'var(--color-bg-secondary, #1a1a1a)', borderRadius: '4px', border: '1px solid var(--color-border)' }}>
+      <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1rem' }}>Paper Trading Controls</h3>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center' }}>
+        <button
+          onClick={() => refreshPrerequisitesMutation.mutate()}
+          disabled={refreshPrerequisitesMutation.isPending}
+          style={{
+            padding: '0.5rem 1rem',
+            fontSize: '0.9rem',
+            backgroundColor: 'var(--color-bg-tertiary, #21262d)',
+            color: 'var(--color-text, #c9d1d9)',
+            border: '1px solid var(--color-border, #30363d)',
+            borderRadius: '4px',
+            cursor: refreshPrerequisitesMutation.isPending ? 'not-allowed' : 'pointer',
+            opacity: refreshPrerequisitesMutation.isPending ? 0.6 : 1,
+          }}
+        >
+          {refreshPrerequisitesMutation.isPending ? 'Checking...' : 'Refresh Prerequisites'}
+        </button>
+        <button
+          onClick={() => {
+            if (window.confirm('Arm paper trading? This will allow the strategy to submit paper orders to Alpaca.')) {
+              armMutation.mutate();
+            }
+          }}
+          disabled={armMutation.isPending || paperArmed || !prerequisitesSatisfied || blockers.length > 0}
+          style={{
+            padding: '0.5rem 1rem',
+            fontSize: '0.9rem',
+            backgroundColor: prerequisitesSatisfied && blockers.length === 0 ? 'var(--color-success, #3fb950)' : 'var(--color-bg-tertiary, #21262d)',
+            color: prerequisitesSatisfied && blockers.length === 0 ? '#fff' : 'var(--color-text-muted, #8b949e)',
+            border: '1px solid var(--color-border, #30363d)',
+            borderRadius: '4px',
+            cursor: (armMutation.isPending || paperArmed || !prerequisitesSatisfied || blockers.length > 0) ? 'not-allowed' : 'pointer',
+            opacity: (armMutation.isPending || paperArmed || !prerequisitesSatisfied || blockers.length > 0) ? 0.6 : 1,
+          }}
+        >
+          {armMutation.isPending ? 'Arming...' : 'Arm Paper Trading'}
+        </button>
+        <button
+          onClick={() => {
+            if (window.confirm('Disarm paper trading? This will immediately stop all paper order submissions.')) {
+              disarmMutation.mutate();
+            }
+          }}
+          disabled={disarmMutation.isPending || !paperArmed}
+          style={{
+            padding: '0.5rem 1rem',
+            fontSize: '0.9rem',
+            backgroundColor: paperArmed ? 'var(--color-error, #f85149)' : 'var(--color-bg-tertiary, #21262d)',
+            color: paperArmed ? '#fff' : 'var(--color-text-muted, #8b949e)',
+            border: '1px solid var(--color-border, #30363d)',
+            borderRadius: '4px',
+            cursor: (disarmMutation.isPending || !paperArmed) ? 'not-allowed' : 'pointer',
+            opacity: (disarmMutation.isPending || !paperArmed) ? 0.6 : 1,
+          }}
+        >
+          {disarmMutation.isPending ? 'Disarming...' : 'Disarm Paper Trading'}
+        </button>
+      </div>
+      {armMutation.isError && (
+        <div className="info-note" style={{ marginTop: '0.75rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
+          <strong>Error arming:</strong> {armMutation.error && typeof armMutation.error === 'object' && 'detail' in armMutation.error ? String(armMutation.error.detail) : 'Unknown error'}
+        </div>
+      )}
+      {disarmMutation.isError && (
+        <div className="info-note" style={{ marginTop: '0.75rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
+          <strong>Error disarming:</strong> {disarmMutation.error && typeof disarmMutation.error === 'object' && 'detail' in disarmMutation.error ? String(disarmMutation.error.detail) : 'Unknown error'}
+        </div>
+      )}
+      {armMutation.isSuccess && (
+        <div className="info-note" style={{ marginTop: '0.75rem', borderLeft: '3px solid var(--color-success)', backgroundColor: 'var(--color-success-bg, #1a2e1a)' }}>
+          <strong>Success:</strong> {armMutation.data?.message ?? 'Paper trading armed'}
+        </div>
+      )}
+      {disarmMutation.isSuccess && (
+        <div className="info-note" style={{ marginTop: '0.75rem', borderLeft: '3px solid var(--color-warning)', backgroundColor: 'var(--color-warning-bg, #2d2b1b)' }}>
+          <strong>Success:</strong> {disarmMutation.data?.message ?? 'Paper trading disarmed'}
+        </div>
+      )}
+      {!prerequisitesSatisfied && blockers.length > 0 && (
+        <div className="muted-text" style={{ marginTop: '0.75rem', fontSize: '0.85rem' }}>
+          Cannot arm: {blockers.join(', ')}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function SystemHealth() {
   const { data, isLoading } = useQuery({
@@ -151,6 +275,11 @@ export function SystemHealth() {
             </div>
           </div>
         )}
+        <PaperTradingControls 
+          paperArmed={paperArmed}
+          prerequisitesSatisfied={prerequisitesSatisfied}
+          blockers={blockers}
+        />
       </section>
 
       <section className="dashboard-section">
