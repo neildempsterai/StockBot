@@ -2398,16 +2398,16 @@ async def get_opportunities_now() -> dict:
                     "price": market_data.get("price"),
                     "gap_pct": market_data.get("gap_pct"),
                     "spread_bps": market_data.get("spread_bps"),
-                "scrappy_present": c.get("scrappy_present", False),
-            }
-            # PHASE 2 FIX: Always check actual snapshot existence, update scrappy_present based on reality
-            snap = snapshot_map.get(symbol_upper)
-            if snap:
-                base.update(_snapshot_to_scrappy_enrichment(snap))
-                base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
-            else:
-                base["scrappy_present"] = False  # Ensure flag reflects reality
-            opportunities.append(_sanitize_json_value(base))
+                    "scrappy_present": c.get("scrappy_present", False),
+                }
+                # PHASE 2 FIX: Always check actual snapshot existence, update scrappy_present based on reality
+                snap = snapshot_map.get(symbol_upper)
+                if snap:
+                    base.update(_snapshot_to_scrappy_enrichment(snap))
+                    base["scrappy_present"] = True  # Override stale flag with actual snapshot existence
+                else:
+                    base["scrappy_present"] = False  # Ensure flag reflects reality
+                opportunities.append(_sanitize_json_value(base))
             result = {"opportunities": opportunities, "run_id": run_id, "updated_at": updated_at}
             return _sanitize_json_value(result)
         
