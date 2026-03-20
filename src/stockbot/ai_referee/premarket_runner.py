@@ -170,7 +170,7 @@ async def run_ai_referee_premarket_once() -> dict:
     
     try:
         from stockbot.db.session import get_session_factory
-        from stockbot.scrappy.store import get_latest_snapshot_for_symbol
+        from stockbot.scrappy.store import get_latest_snapshot_by_symbol
         
         symbols = await _get_focus_symbols()
         if not symbols:
