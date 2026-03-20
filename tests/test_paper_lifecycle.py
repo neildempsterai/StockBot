@@ -122,3 +122,82 @@ def test_reconciliation_shape(client: TestClient) -> None:
     data = r.json()
     assert "status" in data
     assert data["status"] in ("ok", "no_runs") or "orders_matched" in data
+
+
+def test_paper_exposure_lifecycle_fields(client: TestClient) -> None:
+    """GET /v1/paper/exposure returns lifecycle fields when lifecycle exists."""
+    r = client.get("/v1/paper/exposure")
+    assert r.status_code == 200
+    data = r.json()
+    assert "positions" in data
+    assert "count" in data
+    # If positions exist, check for lifecycle fields
+    if data["positions"]:
+        pos = data["positions"][0]
+        # Lifecycle fields should be present (may be None if no lifecycle)
+        assert "entry_order_id" in pos
+        assert "exit_order_id" in pos
+        assert "stop_price" in pos
+        assert "target_price" in pos
+        assert "force_flat_time" in pos
+        assert "protection_mode" in pos
+        assert "protection_active" in pos
+        assert "managed_status" in pos
+        assert "orphaned" in pos
+        assert "universe_source" in pos
+        assert "static_fallback_at_entry" in pos
+        assert "lifecycle_status" in pos
+        assert "exit_reason" in pos
+        assert "exit_ts" in pos
+        assert "last_error" in pos
+        # Sizing fields should be present
+        assert "sizing_at_entry" in pos
+        if pos["sizing_at_entry"]:
+            sizing = pos["sizing_at_entry"]
+            assert "equity" in sizing
+            assert "buying_power" in sizing
+            assert "stop_distance" in sizing
+            assert "qty_approved" in sizing
+
+
+def test_paper_exposure_managed_status_values(client: TestClient) -> None:
+    """GET /v1/paper/exposure managed_status has valid values."""
+    r = client.get("/v1/paper/exposure")
+    assert r.status_code == 200
+    data = r.json()
+    valid_statuses = {"managed", "unmanaged", "orphaned", "exited", "pending", "blocked"}
+    for pos in data.get("positions", []):
+        if "managed_status" in pos and pos["managed_status"]:
+            assert pos["managed_status"] in valid_statuses
+
+
+def test_paper_exposure_lifecycle_status_values(client: TestClient) -> None:
+    """GET /v1/paper/exposure lifecycle_status has valid values when present."""
+    r = client.get("/v1/paper/exposure")
+    assert r.status_code == 200
+    data = r.json()
+    valid_statuses = {
+        "planned",
+        "entry_submitted",
+        "entry_filled",
+        "exit_pending",
+        "exit_submitted",
+        "exited",
+        "orphaned",
+        "blocked",
+        "not_persisted",
+    }
+    for pos in data.get("positions", []):
+        if "lifecycle_status" in pos and pos["lifecycle_status"]:
+            assert pos["lifecycle_status"] in valid_statuses
+
+
+def test_paper_exposure_protection_mode_values(client: TestClient) -> None:
+    """GET /v1/paper/exposure protection_mode has valid values when present."""
+    r = client.get("/v1/paper/exposure")
+    assert r.status_code == 200
+    data = r.json()
+    valid_modes = {"broker_native", "worker_mirrored", "unprotected", "unknown"}
+    for pos in data.get("positions", []):
+        if "protection_mode" in pos and pos["protection_mode"]:
+            assert pos["protection_mode"] in valid_modes
