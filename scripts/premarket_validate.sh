@@ -115,7 +115,8 @@ scrappy_last_attempt=$(echo "$scrappy_status" | python3 -c "import sys, json; d=
 scrappy_failure=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('last_failure_reason', ''))" 2>/dev/null || echo "")
 scrappy_snapshots=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('last_snapshots_updated', 0))" 2>/dev/null || echo "0")
 
-check "Scrappy auto-run is enabled" [ "$scrappy_enabled" = "True" ]
+scrappy_enabled_check=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print('yes' if d.get('scrappy_auto_enabled') in (True, 'True', 'true', 1) else 'no')" 2>/dev/null || echo "no")
+check "Scrappy auto-run is enabled" [ "$scrappy_enabled_check" = "yes" ]
 warn "Scrappy has recent run (< 2 hours)" python3 -c "
 import sys, json, datetime
 last_run = '$scrappy_last_run'
@@ -159,8 +160,8 @@ paper_prereqs=$(get "/v1/paper/arming-prerequisites")
 prereqs_satisfied=$(echo "$paper_prereqs" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('satisfied', False))" 2>/dev/null || echo "False")
 prereqs_blockers=$(echo "$paper_prereqs" | python3 -c "import sys, json; d=json.load(sys.stdin); blockers=d.get('blockers', []); print('|'.join(blockers) if blockers else '')" 2>/dev/null || echo "")
 
-paper_armed=$(echo "$runtime_status" | python3 -c "import sys, json; d=json.load(sys.stdin); pe=d.get('paper_execution', {}); print(pe.get('armed', False))" 2>/dev/null || echo "False")
-paper_reason=$(echo "$runtime_status" | python3 -c "import sys, json; d=json.load(sys.stdin); pe=d.get('paper_execution', {}); print(pe.get('armed_reason', ''))" 2>/dev/null || echo "")
+paper_armed=$(echo "$runtime_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('paper_trading_armed', False))" 2>/dev/null || echo "False")
+paper_reason=$(echo "$runtime_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('paper_armed_reason', ''))" 2>/dev/null || echo "")
 
 check "Paper arming prerequisites endpoint exists" [ -n "$prereqs_satisfied" ]
 if [ "$paper_armed" = "True" ]; then
@@ -206,12 +207,20 @@ if [ "$opp_count" -gt 0 ]; then
 fi
 
 # Check that scrappy status shows honest failure states
-check "Scrappy status shows failure reason when present" [ -n "$scrappy_failure" ] || [ -n "$scrappy_last_run" ]
+# Should have either last_run OR last_attempt OR failure_reason (truthful state)
+scrappy_has_state=$(python3 -c "
+import sys, json
+last_run = '$scrappy_last_run'
+last_attempt = '$scrappy_last_attempt'
+failure = '$scrappy_failure'
+print('yes' if (last_run or last_attempt or failure) else 'no')
+" 2>/dev/null || echo "no")
+check "Scrappy status shows truthful state" [ "$scrappy_has_state" = "yes" ]
 
 # Check that health endpoints are honest
-health_detail=$(get "/v1/health/detail")
-health_api=$(echo "$health_detail" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('api', {}).get('status', 'unknown'))" 2>/dev/null || echo "unknown")
-health_db=$(echo "$health_detail" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('database', {}).get('status', 'unknown'))" 2>/dev/null || echo "unknown")
+health_detail=$(get "/health/detail")
+health_api=$(echo "$health_detail" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('api', 'unknown'))" 2>/dev/null || echo "unknown")
+health_db=$(echo "$health_detail" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('database', 'unknown'))" 2>/dev/null || echo "unknown")
 
 check "Health detail shows API status" [ "$health_api" != "unknown" ]
 check "Health detail shows DB status" [ "$health_db" != "unknown" ]

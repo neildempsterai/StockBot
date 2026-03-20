@@ -388,9 +388,21 @@ export function IntelligenceCenter() {
             if (scannerActive && hasFocusSymbols && scrappyRecent && hasFreshResearch) {
               aliveStatus = 'alive';
               aliveMessage = 'Premarket alive: Scanner active, focus symbols identified, fresh research coverage';
-            } else if (scannerActive && hasFocusSymbols && (scrappyRecent || !scrappyStatus?.last_run_at)) {
+            } else if (scannerActive && hasFocusSymbols && (!scrappyRecent || !scrappyStatus?.last_run_at || focusWithFreshIntelligence === 0)) {
               aliveStatus = 'degraded';
-              aliveMessage = 'Premarket degraded: Scanner active but research coverage missing or stale';
+              const reasons: string[] = [];
+              if (!scrappyStatus?.last_run_at) {
+                reasons.push('Scrappy has not run');
+              } else if (!scrappyRecent) {
+                reasons.push(`Scrappy last run ${Math.round((Date.now() - new Date(scrappyStatus.last_run_at).getTime()) / 60000)} minutes ago`);
+              }
+              if (focusWithFreshIntelligence === 0 && focusSymbols.length > 0) {
+                reasons.push('No fresh research on focus symbols');
+              }
+              if (scrappyStatus?.last_failure_reason) {
+                reasons.push(`Scrappy failure: ${scrappyStatus.last_failure_reason}`);
+              }
+              aliveMessage = `Premarket degraded: Scanner active but ${reasons.join(', ')}`;
             } else if (scannerActive) {
               aliveStatus = 'partial';
               aliveMessage = 'Premarket partial: Scanner active but no focus symbols or research yet';

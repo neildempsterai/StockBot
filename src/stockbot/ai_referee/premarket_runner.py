@@ -53,13 +53,13 @@ async def _should_assess_symbol(symbol: str, snapshot_id: int | None) -> tuple[b
         return False, "no_snapshot"
     
     from stockbot.db.session import get_session_factory
-    from stockbot.db.models import SymbolIntelligenceSnapshot
+    from stockbot.scrappy.store import get_latest_snapshot_by_symbol
     
-        factory = get_session_factory()
-        async with factory() as session:
-            snapshot = await get_latest_snapshot_by_symbol(session, symbol)
-            if not snapshot:
-                return False, "snapshot_not_found"
+    factory = get_session_factory()
+    async with factory() as session:
+        snapshot = await get_latest_snapshot_by_symbol(session, symbol)
+        if not snapshot:
+            return False, "snapshot_not_found"
         
         # Check freshness
         if snapshot.stale_flag:
@@ -183,7 +183,7 @@ async def run_ai_referee_premarket_once() -> dict:
         
         async with factory() as session:
             for symbol in symbols:
-                snapshot = await get_latest_snapshot_for_symbol(session, symbol)
+                snapshot = await get_latest_snapshot_by_symbol(session, symbol)
                 snapshot_id = snapshot.id if snapshot else None
                 
                 should_assess, reason = await _should_assess_symbol(symbol, snapshot_id)

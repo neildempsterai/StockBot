@@ -411,11 +411,29 @@ export function Portfolio() {
               {compareBooks.note}
             </p>
           )}
-          <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-            Shadow metrics shown in Shadow Book section below.
-          </p>
         </section>
       )}
+
+      <section>
+        <SectionHeader title="Shadow Book" subtitle="Internal fill ledger — shadow trades only" />
+        {!shadowTrades && !metrics ? (
+          <BackendNotConnected message="Could not load shadow data from API" detail={apiErrorDetail} />
+        ) : (
+          <div className="grid-cards grid-cards--2">
+            <KPICard
+              title="Shadow trades"
+              value={metrics?.shadow_trades_total ?? shadowTrades?.count ?? 0}
+              variant="shadow"
+            />
+            <KPICard
+              title="Net P&L (shadow)"
+              value={pnl != null ? formatPnl(pnl) : '\u2014'}
+              variant="shadow"
+              valueClass={pnlClass(pnl)}
+            />
+          </div>
+        )}
+      </section>
 
       {reconciliation && (
         <section>
@@ -449,27 +467,6 @@ export function Portfolio() {
           )}
         </section>
       )}
-
-      <section>
-        <SectionHeader title="Shadow Book" subtitle="Internal fill ledger — shadow trades only" />
-        {!shadowTrades && !metrics ? (
-          <BackendNotConnected message="Could not load shadow data from API" detail={apiErrorDetail} />
-        ) : (
-          <div className="grid-cards grid-cards--3">
-            <KPICard
-              title="Shadow trades"
-              value={metrics?.shadow_trades_total ?? shadowTrades?.count ?? 0}
-              variant="shadow"
-            />
-            <KPICard
-              title="Net P&L (shadow)"
-              value={pnl != null ? formatPnl(pnl) : '\u2014'}
-              variant="shadow"
-              valueClass={pnlClass(pnl)}
-            />
-          </div>
-        )}
-      </section>
     </div>
   );
 }

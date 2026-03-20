@@ -1400,15 +1400,57 @@ async def list_paper_trades(
 @app.get("/v1/portfolio/compare-books")
 async def portfolio_compare_books() -> dict:
     """Paper vs shadow summary: honest counts and PnL; null if not available."""
+    import asyncio
     factory = get_session_factory()
     async with factory() as session:
         shadow_count = (await session.execute(select(func.count(ShadowTrade.id)))).scalar() or 0
         shadow_pnl = float((await session.execute(select(func.sum(ShadowTrade.net_pnl)))).scalar() or 0)
         paper_count = (await session.execute(select(func.count(Fill.id)).where(Fill.alpaca_order_id.isnot(None)))).scalar() or 0
+    
+    # Calculate paper P&L: use account equity vs baseline (first snapshot) for total P&L
+    # This includes both realized (from closed positions) and unrealized (from open positions)
+    paper_pnl = None
+    try:
+        client = _alpaca_client_or_503()
+        account = await asyncio.to_thread(client.get_account)
+        current_equity = account.get("equity")
+        if current_equity is not None:
+            try:
+                current_equity_float = float(current_equity)
+                # Get baseline equity from first account snapshot (or use current if no history)
+                async with factory() as session:
+                    first_snapshot = await session.execute(
+                        select(PaperAccountSnapshot)
+                        .order_by(PaperAccountSnapshot.snapshot_ts.asc())
+                        .limit(1)
+                    )
+                    first_row = first_snapshot.scalar_one_or_none()
+                    if first_row and first_row.equity is not None:
+                        baseline_equity = float(first_row.equity)
+                        total_pnl = current_equity_float - baseline_equity
+                        paper_pnl = round(total_pnl, 2) if abs(total_pnl) > 0.01 else None
+                    else:
+                        # No baseline yet, use unrealized P&L from positions as fallback
+                        positions = await asyncio.to_thread(client.list_positions)
+                        total_unrealized = 0.0
+                        for p in positions or []:
+                            unrealized_pl = p.get("unrealized_pl")
+                            if unrealized_pl is not None:
+                                try:
+                                    total_unrealized += float(unrealized_pl)
+                                except (TypeError, ValueError):
+                                    pass
+                        paper_pnl = round(total_unrealized, 2) if abs(total_unrealized) > 0.01 else None
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        # If broker unavailable, return None (truthful)
+        pass
+    
     return {
         "shadow": {"trade_count": shadow_count, "total_net_pnl": round(shadow_pnl, 2)},
-        "paper": {"fill_count": paper_count, "total_net_pnl": None},
-        "note": "Paper PnL from broker; use GET /v1/account and positions for live truth.",
+        "paper": {"fill_count": paper_count, "total_net_pnl": paper_pnl},
+        "note": "Paper PnL calculated from account equity vs baseline (first snapshot). Includes realized + unrealized.",
     }
 
 
@@ -2057,23 +2099,42 @@ async def get_opportunities_now() -> dict:
         factory = get_session_factory()
         async with factory() as session:
             snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
-            # Fetch market data (price/gap/spread) from latest live scanner run for each symbol
-            scanner_result = await get_latest_live_scanner_result(session)
-            if scanner_result and scanner_result.run_id:
-                symbol_list = [c["symbol"] for c in candidates]
-                if symbol_list:
-                    r = await session.execute(
-                        select(ScannerCandidateRow)
-                        .where(ScannerCandidateRow.run_id == scanner_result.run_id)
-                        .where(ScannerCandidateRow.symbol.in_(symbol_list))
-                    )
-                    scanner_rows = r.scalars().all()
-                    for row in scanner_rows:
-                        market_data_map[row.symbol.upper()] = {
+            # Fetch market data (price/gap/spread) from scanner run that matches opportunity run_id
+            # Opportunity run_id is the same as the scanner run_id that created it
+            symbol_list = [(c["symbol"] or "").strip().upper() for c in candidates if c.get("symbol")]
+            if symbol_list and run_id:
+                r = await session.execute(
+                    select(ScannerCandidateRow)
+                    .where(ScannerCandidateRow.run_id == run_id)
+                    .where(ScannerCandidateRow.symbol.in_(symbol_list))
+                )
+                scanner_rows = r.scalars().all()
+                for row in scanner_rows:
+                    symbol_key = (row.symbol or "").strip().upper()
+                    if symbol_key:
+                        market_data_map[symbol_key] = {
                             "price": float(row.price) if row.price is not None else None,
                             "gap_pct": row.gap_pct,
                             "spread_bps": row.spread_bps,
                         }
+                # If no matches found with opportunity run_id, try latest scanner run as fallback
+                if not market_data_map:
+                    scanner_result = await get_latest_live_scanner_result(session)
+                    if scanner_result and scanner_result.run_id:
+                        r2 = await session.execute(
+                            select(ScannerCandidateRow)
+                            .where(ScannerCandidateRow.run_id == scanner_result.run_id)
+                            .where(ScannerCandidateRow.symbol.in_(symbol_list))
+                        )
+                        scanner_rows2 = r2.scalars().all()
+                        for row in scanner_rows2:
+                            symbol_key = (row.symbol or "").strip().upper()
+                            if symbol_key and symbol_key not in market_data_map:
+                                market_data_map[symbol_key] = {
+                                    "price": float(row.price) if row.price is not None else None,
+                                    "gap_pct": row.gap_pct,
+                                    "spread_bps": row.spread_bps,
+                                }
         for c in candidates:
             symbol_upper = (c["symbol"] or "").upper()
             market_data = market_data_map.get(symbol_upper, {})

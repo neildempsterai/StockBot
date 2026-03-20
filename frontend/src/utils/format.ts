@@ -54,12 +54,26 @@ export function formatTs(ts: string | null | undefined): string {
 }
 
 /**
- * Format a number as a dollar P&L value with sign and 2 decimal places.
+ * Format a number as a dollar P&L value with sign, thousand separators, and 2 decimal places.
  */
 export function formatPnl(value: number | null | undefined): string {
   if (value == null) return '—';
-  const sign = value >= 0 ? '+' : '';
-  return `${sign}$${value.toFixed(2)}`;
+  // Use Intl.NumberFormat for proper thousand separators and currency formatting
+  // signDisplay: 'always' ensures + for positive, - for negative, but it doesn't work with currency style
+  // So we'll use 'exceptZero' and manually add + for positive values
+  const formatted = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(value));
+  // Add sign prefix for P&L display
+  if (value > 0) {
+    return `+${formatted}`;
+  } else if (value < 0) {
+    return `-${formatted}`;
+  }
+  return formatted; // Zero has no sign
 }
 
 /**
