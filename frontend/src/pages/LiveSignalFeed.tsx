@@ -77,7 +77,11 @@ export function LiveSignalFeed() {
       <h1 className="page-title">Live Signals</h1>
       <SectionHeader title="Recent signals" subtitle="Strategy-generated signals (deterministic authority)" />
       {signals.length === 0 ? (
-        <EmptyState message="No signals yet." icon="⚡" />
+        <EmptyState 
+          message="No deterministic strategy signals yet" 
+          detail="This page shows only actual strategy-generated trade signals. An empty state here is normal if the strategy has not triggered any signals. Focus symbols and premarket prep appear on other pages."
+          icon="⚡" 
+        />
       ) : (
         <div className="table-wrap">
           <table className="data-table">

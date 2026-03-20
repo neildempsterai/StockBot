@@ -131,6 +131,16 @@ except:
 "
 warn "Scrappy has recent attempt" [ -n "$scrappy_last_attempt" ]
 check "Scrappy has no recent failure" [ -z "$scrappy_failure" ]
+# Check service health diagnostics
+scrappy_service_health=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('service_health', 'unknown'))" 2>/dev/null || echo "unknown")
+scrappy_service_health_reason=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('service_health_reason', ''))" 2>/dev/null || echo "")
+check "Scrappy service health is not failed" [ "$scrappy_service_health" != "failed" ]
+if [ "$scrappy_service_health" = "failed" ]; then
+  echo "  FAIL: Scrappy service health reason: $scrappy_service_health_reason"
+  if echo "$scrappy_service_health_reason" | grep -qi "auth\|password"; then
+    echo "  CRITICAL: Database authentication error detected!"
+  fi
+fi
 # Check that snapshots are refreshed even when no new URLs (quiet morning behavior)
 scrappy_outcome=$(echo "$scrappy_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('last_outcome', ''))" 2>/dev/null || echo "")
 if [ "$scrappy_outcome" = "no_new_candidate_urls" ]; then
@@ -173,7 +183,18 @@ ai_referee_recent=$(get "/v1/ai-referee/recent?limit=10")
 ai_assessment_count=$(echo "$ai_referee_recent" | python3 -c "import sys, json; d=json.load(sys.stdin); assessments=d.get('assessments', []); print(len(assessments))" 2>/dev/null || echo "0")
 
 check "AI Referee status is available" [ -n "$ai_referee_enabled" ]
+# Check AI Referee service health
+ai_referee_status=$(get "/v1/ai-referee/status")
+ai_referee_service_health=$(echo "$ai_referee_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('service_health', 'unknown'))" 2>/dev/null || echo "unknown")
+ai_referee_service_health_reason=$(echo "$ai_referee_status" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('service_health_reason', ''))" 2>/dev/null || echo "")
 if [ "$ai_referee_enabled" = "True" ]; then
+  check "AI Referee service health is not failed" [ "$ai_referee_service_health" != "failed" ]
+  if [ "$ai_referee_service_health" = "failed" ]; then
+    echo "  FAIL: AI Referee service health reason: $ai_referee_service_health_reason"
+    if echo "$ai_referee_service_health_reason" | grep -qi "auth\|password"; then
+      echo "  CRITICAL: Database authentication error detected!"
+    fi
+  fi
   warn "AI Referee has recent assessments or explicit skip reasons" python3 -c "
 import sys, json
 # Check if AI Referee premarket runner has run and provided status

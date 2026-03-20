@@ -1706,6 +1706,78 @@ async def ai_referee_recent(
     }
 
 
+@app.get("/v1/ai-referee/status")
+async def ai_referee_status() -> dict:
+    """AI Referee premarket service status: health, last run, enabled state."""
+    from stockbot.config import get_settings
+    from datetime import UTC, datetime, timedelta
+    import redis.asyncio as redis
+    import json
+    settings = get_settings()
+    ai_referee_enabled = getattr(settings, "ai_referee_enabled", False)
+    
+    # Get Redis state for last run
+    last_run_ts = None
+    last_symbols = []
+    try:
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        last_run_ts = await r.get("stockbot:ai_referee_premarket:last_run_ts")
+        symbols_json = await r.get("stockbot:ai_referee_premarket:last_symbols")
+        await r.aclose()
+        if symbols_json:
+            try:
+                last_symbols = json.loads(symbols_json)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    # Count recent assessments (last 4 hours)
+    recent_assessments_count = 0
+    try:
+        from stockbot.ai_referee.store import list_recent_assessments
+        factory = get_session_factory()
+        async with factory() as session:
+            recent = await list_recent_assessments(session, limit=100)
+            cutoff = datetime.now(UTC) - timedelta(hours=4)
+            recent_assessments_count = len([
+                a for a in recent 
+                if a.assessment_ts and a.assessment_ts.replace(tzinfo=UTC) > cutoff
+            ])
+    except Exception:
+        pass
+    
+    # Determine service health
+    service_health = "unknown"
+    service_health_reason = None
+    if not ai_referee_enabled:
+        service_health = "disabled"
+        service_health_reason = "ai_referee_enabled=false"
+    elif last_run_ts:
+        try:
+            run_dt = datetime.fromisoformat(last_run_ts.replace("Z", "+00:00"))
+            age_minutes = (datetime.now(UTC) - run_dt.replace(tzinfo=UTC)).total_seconds() / 60
+            if age_minutes < 240:  # Recent run within 4 hours
+                service_health = "healthy"
+            else:
+                service_health = "stale"
+                service_health_reason = f"last_run_{int(age_minutes)}_minutes_ago"
+        except Exception:
+            pass
+    else:
+        service_health = "no_runs"
+        service_health_reason = "no_runs_recorded"
+    
+    return {
+        "ai_referee_enabled": ai_referee_enabled,
+        "service_health": service_health,
+        "service_health_reason": service_health_reason,
+        "last_run_at": last_run_ts,
+        "last_symbols_checked": last_symbols,
+        "recent_assessments_count": recent_assessments_count,
+    }
+
+
 @app.get("/v1/ai-referee/{assessment_id}")
 async def ai_referee_get(assessment_id: str) -> dict:
     """Single assessment by assessment_id (UUID string)."""
@@ -2344,6 +2416,7 @@ async def get_scrappy_status() -> dict:
     """Scrappy automation status: last auto-run, watchlist size, auto-enabled, with truthful failure tracking."""
     from stockbot.config import get_settings
     from stockbot.scrappy.run_service import get_watchlist_symbols_list
+    from datetime import UTC, datetime, timedelta
     import redis.asyncio as redis
     import json
     settings = get_settings()
@@ -2383,6 +2456,41 @@ async def get_scrappy_status() -> dict:
     except Exception:
         pass
     
+    # Determine service health: healthy if no recent auth errors and last attempt was recent
+    service_health = "unknown"
+    service_health_reason = None
+    if last_failure_reason:
+        if "password authentication failed" in last_failure_reason.lower() or "invalidpassword" in last_failure_reason.lower():
+            service_health = "failed"
+            service_health_reason = f"auth_error: {last_failure_reason}"
+        else:
+            service_health = "degraded"
+            service_health_reason = last_failure_reason
+    elif last_attempt_ts:
+        try:
+            attempt_dt = datetime.fromisoformat(last_attempt_ts.replace("Z", "+00:00"))
+            age_minutes = (datetime.now(UTC) - attempt_dt.replace(tzinfo=UTC)).total_seconds() / 60
+            if age_minutes < 120:  # Recent attempt within 2 hours
+                if last_outcome and last_outcome not in ("failed", "skipped"):
+                    service_health = "healthy"
+                elif last_outcome == "skipped":
+                    service_health = "healthy"  # Skipped is normal (e.g., no symbols)
+                    service_health_reason = "skipped (no symbols or outside session)"
+                else:
+                    service_health = "unknown"
+            else:
+                service_health = "stale"
+                service_health_reason = f"last_attempt_{int(age_minutes)}_minutes_ago"
+        except Exception:
+            pass
+    elif last_auto and last_auto.run_ts:
+        age_minutes = (datetime.now(UTC) - last_auto.run_ts.replace(tzinfo=UTC)).total_seconds() / 60
+        if age_minutes < 120:
+            service_health = "healthy"
+        else:
+            service_health = "stale"
+            service_health_reason = f"last_run_{int(age_minutes)}_minutes_ago"
+    
     # Calculate coverage status counts for focus symbols
     coverage_counts = {"fresh_research": 0, "carried_forward_research": 0, "low_evidence": 0, "no_research": 0}
     try:
@@ -2412,6 +2520,8 @@ async def get_scrappy_status() -> dict:
     
     return {
         "scrappy_auto_enabled": auto_enabled,
+        "service_health": service_health,
+        "service_health_reason": service_health_reason,
         "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
         "last_attempt_at": last_attempt_ts,
         "last_run_id": last_auto.run_id if last_auto else None,
