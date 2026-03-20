@@ -1,4 +1,4 @@
-"""Per-symbol intraday state for INTRA_EVENT_MOMO: bars, vwap, opening range, news."""
+"""Per-symbol intraday state: bars, vwap, opening range, news, multi-timeframe."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,6 +29,8 @@ class SymbolState:
     latest_quote_ts: datetime | None = None
     news: list[NewsItem] = field(default_factory=list)
     prev_close: Decimal | None = None
+    latest_bid_size: int | None = None
+    latest_ask_size: int | None = None
 
     def session_open(self) -> Decimal | None:
         """Session open price: first bar's open."""
@@ -103,3 +105,86 @@ class SymbolState:
 
     def last_bar(self) -> BarLike | None:
         return self.bars[-1] if self.bars else None
+
+    # --- Multi-timeframe aggregation ---
+
+    def bars_5m(self) -> list[BarLike]:
+        """Aggregate 1-minute bars into 5-minute candles."""
+        return self._aggregate_bars(5)
+
+    def bars_15m(self) -> list[BarLike]:
+        """Aggregate 1-minute bars into 15-minute candles."""
+        return self._aggregate_bars(15)
+
+    def _aggregate_bars(self, period: int) -> list[BarLike]:
+        if len(self.bars) < period:
+            return []
+        result: list[BarLike] = []
+        for i in range(0, len(self.bars) - period + 1, period):
+            chunk = self.bars[i:i + period]
+            result.append(BarLike(
+                symbol=self.symbol,
+                open=chunk[0].open,
+                high=max(b.high for b in chunk),
+                low=min(b.low for b in chunk),
+                close=chunk[-1].close,
+                volume=sum(b.volume for b in chunk),
+                timestamp=chunk[-1].timestamp,
+            ))
+        return result
+
+    def ema_on_bars(self, bars: list[BarLike], period: int) -> Decimal | None:
+        """EMA on a list of bars' close prices."""
+        if len(bars) < period:
+            return None
+        closes = [b.close for b in bars]
+        multiplier = Decimal(2) / (Decimal(period) + 1)
+        ema = sum(closes[:period]) / period
+        for val in closes[period:]:
+            ema = (val - ema) * multiplier + ema
+        return ema.quantize(Decimal("0.01"))
+
+    def trend_direction_5m(self) -> str:
+        """5-minute trend: 'up' if 9 EMA > 20 EMA, 'down' if <, 'flat' otherwise."""
+        bars = self.bars_5m()
+        if len(bars) < 20:
+            return "flat"
+        ema9 = self.ema_on_bars(bars, 9)
+        ema20 = self.ema_on_bars(bars, 20)
+        if ema9 is None or ema20 is None:
+            return "flat"
+        diff_pct = (ema9 - ema20) / ema20 * 100
+        if diff_pct > Decimal("0.05"):
+            return "up"
+        elif diff_pct < Decimal("-0.05"):
+            return "down"
+        return "flat"
+
+    def bid_ask_imbalance(self) -> Decimal | None:
+        """Order imbalance from bid/ask sizes. Range [-1, +1].
+
+        Positive = more bid pressure (bullish).
+        Negative = more ask pressure (bearish).
+        """
+        if self.latest_bid_size is None or self.latest_ask_size is None:
+            return None
+        total = self.latest_bid_size + self.latest_ask_size
+        if total == 0:
+            return Decimal("0")
+        return (Decimal(self.latest_bid_size - self.latest_ask_size) / total).quantize(Decimal("0.01"))
+
+    def morning_move_strength(self, atr: Decimal | None) -> Decimal | None:
+        """How far price has traveled from open relative to ATR.
+
+        Returns ratio: (session_high - session_open) / ATR for bullish,
+        (session_open - session_low) / ATR for bearish.
+        Uses the larger of the two moves.
+        """
+        if not self.bars or atr is None or atr <= 0:
+            return None
+        s_open = self.bars[0].open
+        s_high = max(b.high for b in self.bars)
+        s_low = min(b.low for b in self.bars)
+        up_move = (s_high - s_open) / atr
+        down_move = (s_open - s_low) / atr
+        return max(up_move, down_move).quantize(Decimal("0.01"))

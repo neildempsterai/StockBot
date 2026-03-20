@@ -1,7 +1,8 @@
 """
-OPEN_DRIVE_MOMO / 0.1.0 — opening momentum strategy.
-Extracted from INTRA_EVENT_MOMO baseline. Optimized for first part of session (09:35-11:30 ET).
-Deterministic breakout/OR/VWAP/gap/volume/spread/news logic.
+OPEN_DRIVE_MOMO / 0.2.0 — aggressive opening momentum strategy.
+Differentiated from INTRA_EVENT_MOMO: tighter window (09:35-10:00),
+higher conviction thresholds (gap >2%, RVol >2.0x), aggressive OR breakout
+with 0.5% buffer. Pure opening-drive scalp play.
 """
 from __future__ import annotations
 
@@ -10,91 +11,30 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-# Default ET entry/exit; config overrides
 ENTRY_START_ET = "09:35"
-ENTRY_END_ET = "11:30"
+ENTRY_END_ET = "10:00"
 FORCE_FLAT_ET = "15:45"
 
 STRATEGY_ID = "OPEN_DRIVE_MOMO"
-STRATEGY_VERSION = "0.1.0"
+STRATEGY_VERSION = "0.2.0"
 
-from stockbot.strategies.intra_event_momo import (
-    POSITIVE_KEYWORDS,
-    NEGATIVE_KEYWORDS,
-    NEGATION_WORDS,
-    _keyword_match_with_negation,
-)
-
-# Candidate filters
-MIN_PRICE = Decimal("5")
-MAX_PRICE = Decimal("500")
-MIN_DOLLAR_VOLUME_1M = 1_000_000
-MAX_SPREAD_BPS = 20
-MIN_ABS_GAP_PCT = Decimal("1.0")
-MIN_REL_VOLUME_5M = Decimal("1.5")
-
-
-@dataclass
-class NewsItem:
-    """Alpaca news item (headline + summary)."""
-    headline: str
-    summary: str
-    published_at: datetime
-    symbol: str | None
-    raw: dict[str, Any]
-
-
-def _parse_news_published(ts: Any) -> datetime | None:
-    if ts is None:
-        return None
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except Exception:
-            return None
-    return None
-
-
-from stockbot.strategies.intra_event_momo import (  # noqa: E811
+from stockbot.strategies.intra_event_momo import (  # noqa: E402
     classify_news_side,
     news_keyword_hits,
+    FeatureSet,
+    NewsItem,
 )
+from stockbot.strategies.types import EvalResult
+from stockbot.market_sessions import et_time_in_range as _et_time_in_range
+from stockbot.market_sessions import et_time_after as _et_time_after
 
-
-@dataclass
-class FeatureSet:
-    """Per-symbol per-day deterministic features."""
-    symbol: str
-    ts: datetime
-    prev_close: Decimal
-    gap_pct_from_prev_close: Decimal
-    spread_bps: int
-    minute_dollar_volume: Decimal
-    rel_volume_5m: Decimal
-    opening_range_high: Decimal | None
-    opening_range_low: Decimal | None
-    session_vwap: Decimal | None
-    latest_bid: Decimal | None
-    latest_ask: Decimal | None
-    latest_last: Decimal | None
-    latest_minute_close: Decimal | None
-    news_side: str  # long | short | neutral
-    news_keyword_hits: list[str]  # matched keywords
-    # Derived for audit
-    signal_reason_codes: list[str] = field(default_factory=list)
-
-
-def compute_gap_pct(prev_close: Decimal, current: Decimal) -> Decimal:
-    if prev_close is None or prev_close == 0:
-        return Decimal("0")
-    return ((current - prev_close) / prev_close * 100).quantize(Decimal("0.01"))
-
-
-from stockbot.strategies.types import EvalResult  # noqa: E402, E811
-
-
-from stockbot.market_sessions import et_time_in_range as _et_time_in_range  # noqa: E402
-from stockbot.market_sessions import et_time_after as _et_time_after  # noqa: E402
+MIN_PRICE = Decimal("5")
+MAX_PRICE = Decimal("500")
+MIN_DOLLAR_VOLUME_1M = 1_500_000
+MAX_SPREAD_BPS = 15
+MIN_ABS_GAP_PCT = Decimal("2.0")
+MIN_REL_VOLUME_5M = Decimal("2.0")
+BREAKOUT_BUFFER_PCT = Decimal("0.005")
 
 
 def evaluate(
@@ -104,9 +44,7 @@ def evaluate(
     entry_end_et: str = ENTRY_END_ET,
     force_flat_et: str = FORCE_FLAT_ET,
 ) -> EvalResult:
-    """
-    Deterministic evaluation. Returns side=None if no signal or filters not passed.
-    """
+    """Aggressive opening-drive evaluation with higher conviction thresholds."""
     reason_codes: list[str] = []
     snapshot: dict[str, Any] = {
         "symbol": features.symbol,
@@ -127,23 +65,10 @@ def evaluate(
         "news_keyword_hits": features.news_keyword_hits,
     }
 
-    # Time: must be in entry window and before force flat
     if not _et_time_in_range(features.ts, entry_start_et, entry_end_et):
-        return EvalResult(
-            side=None,
-            reason_codes=[],
-            feature_snapshot=snapshot,
-            passes_filters=False,
-            reject_reason="outside_entry_window",
-        )
+        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="outside_entry_window")
     if _et_time_after(features.ts, force_flat_et):
-        return EvalResult(
-            side=None,
-            reason_codes=[],
-            feature_snapshot=snapshot,
-            passes_filters=False,
-            reject_reason="after_force_flat",
-        )
+        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="after_force_flat")
 
     price = features.latest_last or features.latest_ask or features.latest_bid or Decimal("0")
     if price < MIN_PRICE or price > MAX_PRICE:
@@ -158,32 +83,37 @@ def evaluate(
         return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="gap_too_small")
     if features.rel_volume_5m < MIN_REL_VOLUME_5M:
         return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="rel_volume_below_min")
-    if features.news_side == "neutral":
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="news_neutral")
 
     close = features.latest_minute_close or price
     vwap = features.session_vwap
     or_high = features.opening_range_high
     or_low = features.opening_range_low
 
-    # Long entry
-    if features.news_side == "long":
-        if close > or_high and vwap is not None and price > vwap:
-            reason_codes.extend(["breakout_above_or_high", "above_vwap", "news_long"])
-            snapshot["signal_reason_codes"] = reason_codes
-            return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-        # no long signal this bar
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="long_conditions_not_met")
+    breakout_long_level = or_high * (1 + BREAKOUT_BUFFER_PCT)
+    breakout_short_level = or_low * (1 - BREAKOUT_BUFFER_PCT)
 
-    # Short entry
-    if features.news_side == "short":
-        if close < or_low and vwap is not None and price < vwap:
-            reason_codes.extend(["breakdown_below_or_low", "below_vwap", "news_short"])
-            snapshot["signal_reason_codes"] = reason_codes
-            return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="short_conditions_not_met")
+    # Long: aggressive breakout above OR high with buffer, above VWAP
+    # News is a booster, not a hard gate -- pure volume/price can trigger
+    if close > breakout_long_level and vwap is not None and price > vwap:
+        reason_codes.extend(["aggressive_breakout_above_or", "above_vwap"])
+        if features.news_side == "long":
+            reason_codes.append("news_long")
+        elif features.news_side == "short":
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="news_conflicts_long_setup")
+        snapshot["signal_reason_codes"] = reason_codes
+        return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
 
-    return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="news_neutral")
+    # Short: aggressive breakdown below OR low with buffer, below VWAP
+    if close < breakout_short_level and vwap is not None and price < vwap:
+        reason_codes.extend(["aggressive_breakdown_below_or", "below_vwap"])
+        if features.news_side == "short":
+            reason_codes.append("news_short")
+        elif features.news_side == "long":
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="news_conflicts_short_setup")
+        snapshot["signal_reason_codes"] = reason_codes
+        return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
+
+    return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="breakout_conditions_not_met")
 
 
 def exit_stop_target_prices(side: str, or_high: Decimal, or_low: Decimal, entry_price: Decimal, r_mult: float = 2.0) -> tuple[Decimal, Decimal]:

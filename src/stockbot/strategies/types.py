@@ -13,3 +13,5 @@ class EvalResult:
     feature_snapshot: dict[str, Any]
     passes_filters: bool
     reject_reason: str | None
+    quality_score: int = 0  # 0-100 entry quality score
+    quality_components: dict[str, Any] = field(default_factory=dict)

@@ -90,6 +90,9 @@ class ShadowPosition:
     max_hold_days: int = 0
     strategy_id: str = ""
     entry_date: str = ""  # YYYY-MM-DD
+    original_stop_price: Decimal | None = None
+    original_qty: Decimal | None = None
+    quality_score: int = 0
 
 
 def _gross_pnl(side: str, qty: Decimal, entry: Decimal, exit_price: Decimal) -> Decimal:

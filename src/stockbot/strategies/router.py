@@ -98,15 +98,41 @@ def select_primary_strategy(
     """
     if not active_strategies:
         return None
-    
+
     sorted_strategies = sorted(active_strategies, key=lambda c: get_strategy_priority(c.strategy_id))
-    
+
     for config in sorted_strategies:
         strategy_traded_key = f"{config.strategy_id}:{symbol}"
         if strategy_traded_key not in already_traded_today:
             return config
-    
+
     return None
+
+
+def get_all_eligible_strategies(
+    active_strategies: list[StrategyConfig],
+    symbol: str,
+    already_traded_today: set[str],
+    open_positions_by_symbol: dict[str, str],
+) -> list[StrategyConfig]:
+    """Return ALL eligible strategies for a symbol in priority order.
+
+    Unlike select_primary_strategy (which returns only one), this allows
+    the caller to evaluate multiple strategies and pick the best signal
+    via quality scoring.
+    """
+    if not active_strategies:
+        return []
+    eligible: list[StrategyConfig] = []
+    for config in sorted(active_strategies, key=lambda c: get_strategy_priority(c.strategy_id)):
+        strategy_traded_key = f"{config.strategy_id}:{symbol}"
+        if strategy_traded_key in already_traded_today:
+            continue
+        conflict, _ = has_conflicting_position(symbol, config.strategy_id, open_positions_by_symbol)
+        if conflict:
+            continue
+        eligible.append(config)
+    return eligible
 
 
 def has_conflicting_position(

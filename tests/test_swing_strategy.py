@@ -90,7 +90,7 @@ def _base_features(**overrides) -> SwingFeatureSet:
 class TestStrategyIdentity:
     def test_strategy_id_and_version(self):
         assert STRATEGY_ID == "SWING_EVENT_CONTINUATION"
-        assert STRATEGY_VERSION == "0.1.0"
+        assert STRATEGY_VERSION == "0.2.0"
 
     def test_holding_period_type_is_swing(self):
         assert HOLDING_PERIOD_TYPE == "swing"
@@ -251,7 +251,8 @@ class TestStopTarget:
         )
         assert stop < Decimal("50.00")
         assert target > Decimal("50.00")
-        assert stop >= Decimal("47.00") * Decimal("0.995")
+        # v0.2.0: uses min() for wider stop (deeper support), so stop is at day_2_low * 0.995
+        assert stop <= Decimal("47.00") * Decimal("0.995") + Decimal("0.01")
 
     def test_long_target_is_r_multiple(self):
         stop, target = compute_stop_target(

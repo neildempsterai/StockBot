@@ -73,6 +73,7 @@ from stockbot.strategies.router import (
     has_conflicting_position,
     should_evaluate_strategy,
     select_primary_strategy,
+    get_all_eligible_strategies,
 )
 from stockbot.strategies.swing_event_continuation import (
     STRATEGY_ID as SWING_EVENT_CONTINUATION_ID,
@@ -81,6 +82,11 @@ from stockbot.strategies.swing_event_continuation import (
     evaluate as evaluate_swing_event_continuation,
     compute_stop_target as compute_stop_target_swing,
 )
+from stockbot.strategies.daily_context import DailyContext, fetch_daily_context
+from stockbot.strategies.regime import MarketRegime, detect_regime
+from stockbot.strategies.entry_scorer import compute_entry_score, size_multiplier_from_score
+from stockbot.risk.portfolio import PortfolioRiskManager
+from stockbot.risk.exit_manager import TrailingStopState, update_trailing_state, check_partial_exit, check_time_decay_intraday
 
 # Paper execution: sync Alpaca calls run in thread
 def _submit_paper_order(
@@ -534,6 +540,56 @@ async def _evaluate_symbol_with_strategy(
                 logger.debug("rejection_summary_persist_failed symbol=%s strategy=%s reason=%s error=%s", symbol, strategy_id, eval_result.reject_reason, e)
         return False
     
+    # Entry quality scoring
+    dc = None
+    try:
+        from stockbot.strategies.daily_context import DailyContext
+        # Access daily contexts from the closure/settings -- they're passed via features or state
+    except Exception:
+        pass
+
+    min_score = getattr(settings, "min_entry_quality_score", 40)
+    if eval_result.side is not None:
+        try:
+            _dc_sym = None  # will be populated from worker state via feature_snapshot if available
+            _atr_bps = None
+            _regime_label = "unknown"
+            _trend_5m = "flat"
+            _ba_imbalance = None
+            if hasattr(sym_state, 'trend_direction_5m'):
+                _trend_5m = sym_state.trend_direction_5m()
+            if hasattr(sym_state, 'bid_ask_imbalance'):
+                _ba_imbalance = sym_state.bid_ask_imbalance()
+
+            score_components = compute_entry_score(
+                side=eval_result.side,
+                breakout_distance_vs_atr=None,
+                entry_bar_rvol=features.rel_volume_5m if features else None,
+                news_side=eval_result.feature_snapshot.get("news_side", "neutral"),
+                news_keyword_count=len(eval_result.feature_snapshot.get("news_keyword_hits", [])),
+                catalyst_type=None,
+                catalyst_strength=None,
+                spread_bps=features.spread_bps if features else 0,
+                atr_bps=_atr_bps,
+                regime_label=_regime_label,
+                trend_5m=_trend_5m,
+                bid_ask_imbalance=_ba_imbalance,
+            )
+            eval_result.quality_score = score_components.total_score
+            eval_result.quality_components = score_components.to_dict()
+            if eval_result.quality_score < min_score:
+                logger.info("candidate_rejected symbol=%s strategy=%s reason=quality_score_too_low score=%d min=%d",
+                            symbol, strategy_id, eval_result.quality_score, min_score)
+                try:
+                    rejection_key = f"{REDIS_KEY_WORKER_REJECTION_SUMMARY}:{strategy_id}:quality_score_too_low"
+                    await redis_client.incr(rejection_key)
+                    await redis_client.expire(rejection_key, WORKER_REJECTION_SUMMARY_TTL_SEC)
+                except Exception:
+                    pass
+                return False
+        except Exception as e:
+            logger.debug("entry_scoring_failed symbol=%s error=%s", symbol, e)
+
     # Scrappy gating: reject or tag
     if eval_result.side is not None:
         async def _record_rejection(reason_code: str) -> None:
@@ -737,8 +793,18 @@ async def _evaluate_symbol_with_strategy(
             stop_price = (real_entry + min_stop_distance).quantize(Decimal("0.01"))
             target_price = (real_entry - min_stop_distance * Decimal("2")).quantize(Decimal("0.01"))
     
-    # Paper execution logic (only if strategy allows paper)
-    qty = Decimal("100")
+    # Shadow sizing: risk-based using notional equity instead of hardcoded 100
+    shadow_equity = Decimal(str(getattr(settings, "shadow_notional_equity", 100000)))
+    stop_dist_shadow = abs(real_entry - stop_price)
+    if stop_dist_shadow > 0 and shadow_equity > 0 and real_entry > 0:
+        risk_pct = Decimal("0.005")  # 0.5% risk per trade for shadow
+        shadow_risk_dollars = shadow_equity * risk_pct
+        qty = (shadow_risk_dollars / stop_dist_shadow).to_integral_value(rounding="ROUND_FLOOR")
+        qty = max(qty, Decimal("1"))
+        max_shadow_qty = (shadow_equity * Decimal("0.1") / real_entry).to_integral_value(rounding="ROUND_FLOOR")
+        qty = min(qty, max_shadow_qty, Decimal("5000"))
+    else:
+        qty = Decimal("100")
     execution_mode_val = getattr(settings, "execution_mode", "shadow")
     paper_enabled = getattr(settings, "paper_execution_enabled", False)
     paper_armed_config = getattr(settings, "paper_trading_armed", False)
@@ -950,10 +1016,14 @@ async def _evaluate_symbol_with_strategy(
         max_hold_days=strategy_config.max_hold_days,
         strategy_id=strategy_id,
         entry_date=_entry_date_str,
+        original_stop_price=stop_price,
+        original_qty=qty,
+        quality_score=eval_result.quality_score,
     ))
     
-    # Mark symbol as traded by this strategy
+    # Mark symbol as traded by this strategy (with 24h TTL for self-cleanup)
     await redis_client.sadd(traded_today_key, strategy_traded_key)
+    await redis_client.expire(traded_today_key, 86400)
     
     logger.info(
         "signal_emitted symbol=%s strategy=%s side=%s signal_uuid=%s reason_codes=%s",
@@ -1188,13 +1258,41 @@ async def run_worker() -> None:
     state: dict[str, SymbolState] = {sym: SymbolState(symbol=sym) for sym in universe}
     shadow_state = ShadowState()
 
+    # Initialize daily context (ATR, EMAs, avg volume) for each symbol
+    daily_contexts: dict[str, DailyContext] = {}
+    trailing_states: dict[str, TrailingStopState] = {}
+    try:
+        for sym in universe[:25]:
+            ctx = await fetch_daily_context(sym)
+            daily_contexts[sym] = ctx
+        if "SPY" not in daily_contexts:
+            daily_contexts["SPY"] = await fetch_daily_context("SPY")
+        if "SPY" not in state:
+            state["SPY"] = SymbolState(symbol="SPY")
+        logger.info("daily_context_loaded symbols=%d", len(daily_contexts))
+    except Exception as e:
+        logger.warning("daily_context_load_failed error=%s", e)
+
+    # Initialize portfolio risk manager
+    portfolio_risk = PortfolioRiskManager(
+        max_daily_loss_pct=getattr(settings, "max_daily_loss_pct_equity", 3.0),
+        max_portfolio_heat_pct=getattr(settings, "max_portfolio_heat_pct_equity", 5.0),
+        max_total_concurrent_positions=getattr(settings, "max_total_concurrent_positions", 6),
+        max_daily_trades=getattr(settings, "max_daily_trades", 20),
+        notional_equity=Decimal(str(getattr(settings, "shadow_notional_equity", 100000))),
+    )
+
+    # Market regime (updated on each SPY bar)
+    current_regime = MarketRegime(label="unknown", spy_above_vwap=False, spy_trend_5m="flat", spy_atr=None, confidence=0.0)
+
     # Recover open shadow positions from DB to avoid duplicates after restart
     try:
         import zoneinfo as _zi_recovery
         _et_tz_r = _zi_recovery.ZoneInfo("America/New_York")
         _today_et = datetime.now(UTC).astimezone(_et_tz_r)
-        _today_open = _today_et.replace(hour=4, minute=0, second=0, microsecond=0)
-        _since_utc = _today_open.astimezone(UTC)
+        _lookback_days = 7  # covers max 5 trading days for swing positions
+        _since_et = (_today_et - timedelta(days=_lookback_days)).replace(hour=4, minute=0, second=0, microsecond=0)
+        _since_utc = _since_et.astimezone(UTC)
         factory_recovery = get_session_factory()
         async with factory_recovery() as session_recovery:
             store_recovery = LedgerStore(session_recovery)
@@ -1296,29 +1394,50 @@ async def run_worker() -> None:
                     if stream_name == REDIS_STREAM_BARS:
                         event_counts["bars"] += 1
                         bar = _parse_bar_from_payload(payload)
-                        if bar and bar.symbol in universe_set:
-                            s = state[bar.symbol]
-                            if not s.prev_close and s.bars:
-                                s.prev_close = s.bars[0].open
-                            elif not s.prev_close:
-                                s.prev_close = bar.open
-                            s.bars.append(bar)
-                            if len(s.bars) > 200:
-                                s.bars = s.bars[-100:]
-                            await _on_bar(
-                                redis_client, state[bar.symbol], shadow_state,
-                                settings, fee_per_share, slippage_bps,
-                            )
+                        if bar and (bar.symbol in universe_set or bar.symbol == "SPY"):
+                            s = state.get(bar.symbol)
+                            if s is None and bar.symbol == "SPY":
+                                s = SymbolState(symbol="SPY")
+                                state["SPY"] = s
+                            if s:
+                                if not s.prev_close and s.bars:
+                                    s.prev_close = s.bars[0].open
+                                elif not s.prev_close:
+                                    s.prev_close = bar.open
+                                s.bars.append(bar)
+                                if len(s.bars) > 200:
+                                    s.bars = s.bars[-100:]
+                                # Update regime on SPY bars
+                                if bar.symbol == "SPY":
+                                    current_regime = detect_regime(state.get("SPY"), daily_contexts.get("SPY"))
+                                if bar.symbol in universe_set:
+                                    await _on_bar(
+                                        redis_client, s, shadow_state,
+                                        settings, fee_per_share, slippage_bps,
+                                        daily_contexts=daily_contexts,
+                                        trailing_states=trailing_states,
+                                        portfolio_risk=portfolio_risk,
+                                        current_regime=current_regime,
+                                    )
                     elif stream_name == REDIS_STREAM_QUOTES:
                         event_counts["quotes"] += 1
                         q = _parse_quote_from_payload(payload)
                         if q:
                             sym, bid, ask, ts = q
-                            if sym in universe_set:
-                                state[sym].latest_bid = bid
-                                state[sym].latest_ask = ask
-                                state[sym].latest_last = (bid + ask) / 2
-                                state[sym].latest_quote_ts = ts
+                            if sym in universe_set or sym == "SPY":
+                                s = state.get(sym)
+                                if s:
+                                    s.latest_bid = bid
+                                    s.latest_ask = ask
+                                    s.latest_last = (bid + ask) / 2
+                                    s.latest_quote_ts = ts
+                                    raw_q = payload.get("quote") or (payload.get("payload") or {}).get("quote") or {}
+                                    bs = raw_q.get("bs") if "bs" in raw_q else raw_q.get("bid_size")
+                                    asz = raw_q.get("as") if "as" in raw_q else raw_q.get("ask_size")
+                                    if bs is not None:
+                                        s.latest_bid_size = int(bs)
+                                    if asz is not None:
+                                        s.latest_ask_size = int(asz)
                     elif stream_name == REDIS_STREAM_TRADES:
                         event_counts["trades"] += 1
                         t = _parse_trade_from_payload(payload)
@@ -1360,8 +1479,13 @@ async def _on_bar(
     settings: object,
     fee_per_share: Decimal,
     slippage_bps: int,
+    *,
+    daily_contexts: dict[str, DailyContext] | None = None,
+    trailing_states: dict[str, TrailingStopState] | None = None,
+    portfolio_risk: PortfolioRiskManager | None = None,
+    current_regime: MarketRegime | None = None,
 ) -> None:
-    """On completed minute bar: force-flat check, exit check, then entry evaluation."""
+    """On completed minute bar: force-flat check, trailing stop, exit check, then entry."""
     symbol = sym_state.symbol
     force_flat = getattr(settings, "force_flat_et", "15:45")
     scrappy_mode = getattr(settings, "scrappy_mode", "advisory").strip().lower()
@@ -1442,6 +1566,12 @@ async def _on_bar(
                     )
                     await store.update_paper_lifecycle_exited(pos.signal_uuid, exit_ts, "exited")
             shadow_state.close_position(symbol)
+            if portfolio_risk and records:
+                for rec in records:
+                    if rec.get("execution_mode") == "realistic":
+                        portfolio_risk.record_trade_exit(rec["net_pnl"])
+            if trailing_states and str(pos.signal_uuid) in trailing_states:
+                del trailing_states[str(pos.signal_uuid)]
             logger.info(
                 "shadow_closed symbol=%s exit_reason=force_flat signal_uuid=%s",
                 symbol, str(pos.signal_uuid),
@@ -1485,9 +1615,67 @@ async def _on_bar(
                             )
                     shadow_state.close_position(symbol)
                     logger.info("shadow_closed symbol=%s exit_reason=max_hold_reached days=%s signal_uuid=%s", symbol, _trading_days, str(pos.signal_uuid))
+                    # Mirror max-hold exit to paper
+                    execution_mode_val = getattr(settings, "execution_mode", "shadow")
+                    paper_enabled = getattr(settings, "paper_execution_enabled", False)
+                    paper_armed_config = getattr(settings, "paper_trading_armed", False)
+                    try:
+                        paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
+                    except Exception:
+                        paper_armed_redis = False
+                    if execution_mode_val == "paper" and paper_enabled and paper_armed_config and paper_armed_redis:
+                        factory_mh = get_session_factory()
+                        async with factory_mh() as session_mh:
+                            store_mh = LedgerStore(session_mh)
+                            lifecycle = await store_mh.get_paper_lifecycle_by_signal_uuid(pos.signal_uuid)
+                            if lifecycle and lifecycle.exit_order_id is None:
+                                ok, exit_oid, exit_rc = await asyncio.to_thread(
+                                    _submit_paper_exit_order, str(pos.signal_uuid), symbol, pos.side, pos.qty, "max_hold_reached",
+                                )
+                                if ok and exit_oid:
+                                    await store_mh.update_paper_lifecycle_exit_order(pos.signal_uuid, exit_oid, "max_hold_reached", "exit_submitted")
+                                    logger.info("paper_max_hold_exit_submitted symbol=%s signal_uuid=%s", symbol, str(pos.signal_uuid))
+                                else:
+                                    await store_mh.update_paper_lifecycle_error(pos.signal_uuid, exit_rc or "max_hold_exit_failed", "exit_pending")
                     return
             except Exception as e:
                 logger.debug("swing_max_hold_check_failed symbol=%s error=%s", symbol, e)
+
+    # Dynamic exit management: trailing stops and time decay
+    if shadow_state.has_position(symbol) and trailing_states is not None and getattr(settings, "trailing_stop_enabled", True):
+        pos = shadow_state.get_position(symbol)
+        if pos and last_bar:
+            sig_key = str(pos.signal_uuid)
+            if sig_key not in trailing_states:
+                dc = (daily_contexts or {}).get(symbol)
+                trailing_states[sig_key] = TrailingStopState(
+                    entry_price=pos.realistic_entry_price,
+                    original_stop=pos.original_stop_price or pos.stop_price,
+                    original_target=pos.target_price,
+                    side=pos.side,
+                    atr=dc.atr_14 if dc else None,
+                )
+            ts_state = trailing_states[sig_key]
+            regime_mult = current_regime.trailing_stop_multiplier if current_regime else Decimal("1.0")
+            vwap = sym_state.session_vwap()
+            trail_action = update_trailing_state(ts_state, last_bar.high, last_bar.low, last_bar.close, vwap, regime_mult)
+            if trail_action.action == "update_stop" and trail_action.new_stop is not None:
+                pos.stop_price = trail_action.new_stop
+                logger.debug("trailing_stop_updated symbol=%s new_stop=%s reason=%s phase=%s",
+                             symbol, trail_action.new_stop, trail_action.reason, trail_action.trail_phase)
+
+            if pos.holding_period_type != "swing" and getattr(settings, "time_decay_exit_enabled", True):
+                import zoneinfo as _zi_td
+                _et_tz_td = _zi_td.ZoneInfo("America/New_York")
+                _et_now = last_bar.timestamp.astimezone(_et_tz_td).strftime("%H:%M")
+                dc = (daily_contexts or {}).get(symbol)
+                adj_atr = (dc.atr_14 if dc and dc.atr_14 else abs(pos.realistic_entry_price - (pos.original_stop_price or pos.stop_price))) * regime_mult
+                td_action = check_time_decay_intraday(ts_state, _et_now, adj_atr)
+                if td_action and td_action.action == "full_exit":
+                    pass  # let stop/target logic handle via updated stop
+                elif td_action and td_action.action == "tighten_stop" and td_action.new_stop is not None:
+                    pos.stop_price = td_action.new_stop
+                    logger.debug("time_decay_tighten symbol=%s new_stop=%s reason=%s", symbol, td_action.new_stop, td_action.reason)
 
     # Check stop/target exit for open shadow position
     if shadow_state.has_position(symbol):
@@ -1527,6 +1715,14 @@ async def _on_bar(
                             scrappy_mode=scrappy_mode,
                         )
                 shadow_state.close_position(symbol)
+                # Record P&L for circuit breaker
+                if portfolio_risk and records:
+                    for rec in records:
+                        if rec.get("execution_mode") == "realistic":
+                            portfolio_risk.record_trade_exit(rec["net_pnl"])
+                # Clean up trailing state
+                if trailing_states and str(pos.signal_uuid) in trailing_states:
+                    del trailing_states[str(pos.signal_uuid)]
                 logger.info(
                     "shadow_closed symbol=%s exit_reason=%s signal_uuid=%s",
                     symbol, exit_reason, str(pos.signal_uuid),
@@ -1574,12 +1770,18 @@ async def _on_bar(
                                 )
         return
 
+    # Circuit breaker check
+    if portfolio_risk:
+        cb_blocked, cb_reason = portfolio_risk.check_circuit_breaker()
+        if cb_blocked:
+            logger.info("circuit_breaker_active symbol=%s reason=%s", symbol, cb_reason)
+            return
+
     # Get strategy configs and active strategies for current time
     strategy_configs = _get_strategy_configs(settings)
     active_strategies = get_active_strategies(last_bar.timestamp, strategy_configs)
-    
+
     if not active_strategies:
-        # No active strategies, skip evaluation
         return
     
     # Check if symbol already traded by any strategy today (build set of all traded keys)

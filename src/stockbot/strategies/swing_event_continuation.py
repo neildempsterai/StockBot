@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 STRATEGY_ID = "SWING_EVENT_CONTINUATION"
-STRATEGY_VERSION = "0.1.0"
+STRATEGY_VERSION = "0.2.0"
 
 ENTRY_START_ET = "13:00"
 ENTRY_END_ET = "15:30"
@@ -42,8 +42,8 @@ RECLAIM_TOLERANCE_PCT = Decimal("0.5")
 DEFAULT_STOP_PCT = Decimal("3.0")
 DEFAULT_R_MULT = Decimal("2.0")
 
-# Reuse news classification from open_drive_momo
-from stockbot.strategies.open_drive_momo import (
+# Reuse news classification from intra_event_momo
+from stockbot.strategies.intra_event_momo import (
     NewsItem,
     classify_news_side,
     news_keyword_hits as _news_keyword_hits,
@@ -178,7 +178,8 @@ def evaluate(
 ) -> SwingEvalResult:
     """
     Deterministic swing entry evaluation.
-    Long only in v0.1.0 — short swing carries additional overnight risk and is deferred.
+    v0.2.0: supports both long and short entries.
+    Short swings require stronger catalyst (strength >= 5) and tighter filters.
     """
     snapshot = _build_snapshot(features)
     reason_codes: list[str] = []
@@ -264,6 +265,50 @@ def evaluate(
             structure_reasons.append("above_vwap_above_prev_close")
 
     if not structure_ok:
+        # Check for SHORT swing structure if long structure fails
+        short_structure_ok = False
+        short_structure_reasons: list[str] = []
+        short_catalyst = False
+        short_catalyst_reasons: list[str] = []
+
+        # Short catalyst: negative direction with higher strength threshold
+        if features.scrappy_catalyst_direction == "negative" and not features.scrappy_stale and not features.scrappy_conflict:
+            if features.scrappy_catalyst_strength is not None and features.scrappy_catalyst_strength >= 5:
+                short_catalyst = True
+                short_catalyst_reasons.append("scrappy_negative_strong")
+        if features.news_side == "short" and features.news_keyword_hits:
+            short_catalyst = True
+            short_catalyst_reasons.append("news_short")
+
+        if short_catalyst:
+            # Short structure: weak close (bottom 25%) or breakdown below prev low
+            if features.intraday_high is not None and features.intraday_low is not None:
+                today_range_pos = compute_close_position_in_range_pct(close, features.intraday_high, features.intraday_low)
+                if today_range_pos is not None and today_range_pos <= STRONG_CLOSE_TOP_PCT:
+                    short_structure_ok = True
+                    short_structure_reasons.append("weak_close_near_lows")
+
+            if not short_structure_ok and features.prev_low is not None:
+                breakdown_level = features.prev_low * (1 + RECLAIM_TOLERANCE_PCT / 100)
+                if close <= breakdown_level:
+                    short_structure_ok = True
+                    short_structure_reasons.append("breakdown_below_prev_low")
+
+            if not short_structure_ok and features.session_vwap is not None:
+                if close < features.session_vwap and close < features.prev_close:
+                    short_structure_ok = True
+                    short_structure_reasons.append("below_vwap_below_prev_close")
+
+            if short_structure_ok:
+                reason_codes.extend(short_catalyst_reasons)
+                reason_codes.extend(short_structure_reasons)
+                reason_codes.append("swing_continuation_short")
+                snapshot["signal_reason_codes"] = reason_codes
+                return SwingEvalResult(
+                    side="sell", reason_codes=reason_codes, feature_snapshot=snapshot,
+                    passes_filters=True, reject_reason=None,
+                )
+
         return _reject(snapshot, "daily_structure_not_constructive")
 
     # --- All filters passed: emit long signal ---
@@ -288,13 +333,17 @@ def compute_stop_target(
     day_2_low: Decimal | None,
     prev_high: Decimal | None,
     r_mult: Decimal = DEFAULT_R_MULT,
+    atr: Decimal | None = None,
 ) -> tuple[Decimal, Decimal]:
     """
     Swing stop/target.
-    Long: stop below prior day low (or 2-day low if tighter). Target at R-multiple.
+    Long: stop at wider of prior-day-low and 2-day-low (respects deeper support).
+    Capped at 3 ATR if available to prevent excessive risk.
+    Short: stop above prior-day-high with similar logic.
     """
+    max_stop_atr = atr * 3 if atr and atr > 0 else None
+
     if side == "buy":
-        # Stop: tighter of prior-day-low and 2-day-low
         stop_candidates = []
         if prev_low is not None:
             stop_candidates.append(prev_low * Decimal("0.995"))
@@ -302,9 +351,12 @@ def compute_stop_target(
             stop_candidates.append(day_2_low * Decimal("0.995"))
 
         if stop_candidates:
-            stop = max(stop_candidates)
+            stop = min(stop_candidates)  # wider stop respects deeper support
         else:
             stop = entry_price * (1 - DEFAULT_STOP_PCT / 100)
+
+        if max_stop_atr and (entry_price - stop) > max_stop_atr:
+            stop = (entry_price - max_stop_atr).quantize(Decimal("0.01"))
 
         r = entry_price - stop
         if r <= 0:
@@ -312,10 +364,16 @@ def compute_stop_target(
         target = entry_price + r_mult * r
         return (stop.quantize(Decimal("0.01")), target.quantize(Decimal("0.01")))
     else:
-        # Short swing deferred in v0.1.0 — fallback stop/target
-        stop = entry_price * (1 + DEFAULT_STOP_PCT / 100)
+        stop_candidates = []
         if prev_high is not None:
-            stop = max(stop, prev_high * Decimal("1.005"))
+            stop_candidates.append(prev_high * Decimal("1.005"))
+        stop_candidates.append(entry_price * (1 + DEFAULT_STOP_PCT / 100))
+
+        stop = max(stop_candidates)  # wider stop for shorts
+
+        if max_stop_atr and (stop - entry_price) > max_stop_atr:
+            stop = (entry_price + max_stop_atr).quantize(Decimal("0.01"))
+
         r = stop - entry_price
         if r <= 0:
             r = entry_price * Decimal("0.01")

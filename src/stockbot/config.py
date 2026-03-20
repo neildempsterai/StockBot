@@ -184,6 +184,35 @@ class Settings(BaseSettings):
     swing_max_symbol_exposure_pct_equity: float = Field(default=5.0, alias="SWING_MAX_SYMBOL_EXPOSURE_PCT_EQUITY")
     swing_max_overnight_exposure_pct_equity: float = Field(default=10.0, alias="SWING_MAX_OVERNIGHT_EXPOSURE_PCT_EQUITY")
 
+    # --- Portfolio-level risk controls ---
+    max_daily_loss_pct_equity: float = Field(default=3.0, alias="MAX_DAILY_LOSS_PCT_EQUITY")
+    max_portfolio_heat_pct_equity: float = Field(default=5.0, alias="MAX_PORTFOLIO_HEAT_PCT_EQUITY")
+    max_total_concurrent_positions: int = Field(default=6, alias="MAX_TOTAL_CONCURRENT_POSITIONS")
+    max_daily_trades: int = Field(default=20, alias="MAX_DAILY_TRADES")
+    shadow_notional_equity: float = Field(default=100_000.0, alias="SHADOW_NOTIONAL_EQUITY")
+
+    # --- Dynamic exit management ---
+    trailing_stop_enabled: bool = Field(default=True, alias="TRAILING_STOP_ENABLED")
+    trailing_stop_breakeven_at_r: float = Field(default=1.0, alias="TRAILING_STOP_BREAKEVEN_AT_R")
+    partial_exit_enabled: bool = Field(default=True, alias="PARTIAL_EXIT_ENABLED")
+    partial_exit_pct_at_1r: int = Field(default=50, alias="PARTIAL_EXIT_PCT_AT_1R")
+    partial_exit_pct_at_2r: int = Field(default=25, alias="PARTIAL_EXIT_PCT_AT_2R")
+    time_decay_exit_enabled: bool = Field(default=True, alias="TIME_DECAY_EXIT_ENABLED")
+    vwap_exit_management_enabled: bool = Field(default=True, alias="VWAP_EXIT_MANAGEMENT_ENABLED")
+
+    # --- Entry quality scoring ---
+    min_entry_quality_score: int = Field(default=40, alias="MIN_ENTRY_QUALITY_SCORE")
+    entry_score_size_modulation: bool = Field(default=True, alias="ENTRY_SCORE_SIZE_MODULATION")
+
+    # --- Short selling ---
+    max_short_gross_exposure_pct_equity: float = Field(default=15.0, alias="MAX_SHORT_GROSS_EXPOSURE_PCT_EQUITY")
+    short_risk_multiplier: float = Field(default=0.75, alias="SHORT_RISK_MULTIPLIER")
+    short_max_concurrent: int = Field(default=2, alias="SHORT_MAX_CONCURRENT")
+    max_gap_up_on_short_pct: float = Field(default=5.0, alias="MAX_GAP_UP_ON_SHORT_PCT")
+
+    # --- Liquidity-aware sizing ---
+    max_pct_of_adv: float = Field(default=1.0, alias="MAX_PCT_OF_ADV")
+
     # Scrappy strategy bridge: off | advisory | required
     scrappy_mode: str = Field(default="advisory", alias="SCRAPPY_MODE")
 

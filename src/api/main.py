@@ -281,6 +281,16 @@ async def runtime_status() -> dict:
             "feed": s.feed,
             "extended_hours_enabled": s.extended_hours_enabled,
         },
+        "risk_management": {
+            "max_daily_loss_pct": getattr(s, "max_daily_loss_pct_equity", 3.0),
+            "max_portfolio_heat_pct": getattr(s, "max_portfolio_heat_pct_equity", 5.0),
+            "max_total_concurrent_positions": getattr(s, "max_total_concurrent_positions", 6),
+            "trailing_stop_enabled": getattr(s, "trailing_stop_enabled", True),
+            "partial_exit_enabled": getattr(s, "partial_exit_enabled", True),
+            "min_entry_quality_score": getattr(s, "min_entry_quality_score", 40),
+            "short_max_concurrent": getattr(s, "short_max_concurrent", 2),
+            "max_short_gross_exposure_pct": getattr(s, "max_short_gross_exposure_pct_equity", 15.0),
+        },
         "scheduler": {
             "mode": "daily_reset_only",
             "note": "Current scheduler only clears traded_today at 04:00 ET; no orchestration.",

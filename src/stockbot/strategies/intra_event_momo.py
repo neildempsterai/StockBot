@@ -242,32 +242,46 @@ def evaluate(
         return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="gap_too_small")
     if features.rel_volume_5m < MIN_REL_VOLUME_5M:
         return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="rel_volume_below_min")
-    if features.news_side == "neutral":
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="news_neutral")
 
     close = features.latest_minute_close or price
     vwap = features.session_vwap
     or_high = features.opening_range_high
     or_low = features.opening_range_low
 
-    # Long entry
-    if features.news_side == "long":
-        if close > or_high and vwap is not None and price > vwap:
-            reason_codes.extend(["breakout_above_or_high", "above_vwap", "news_long"])
-            snapshot["signal_reason_codes"] = reason_codes
-            return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-        # no long signal this bar
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="long_conditions_not_met")
+    # News is no longer a hard gate: strong technical breakout + volume can trigger
+    # without confirming news. News conflict (opposite direction) still blocks.
+    # Neutral news with very strong volume (RVol > 3.0x) is allowed.
+    high_conviction_volume = features.rel_volume_5m >= Decimal("3.0")
 
-    # Short entry
-    if features.news_side == "short":
-        if close < or_low and vwap is not None and price < vwap:
-            reason_codes.extend(["breakdown_below_or_low", "below_vwap", "news_short"])
-            snapshot["signal_reason_codes"] = reason_codes
-            return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
-        return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="short_conditions_not_met")
+    # Long entry: close above OR high + above VWAP
+    if close > or_high and vwap is not None and price > vwap:
+        if features.news_side == "short":
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="news_conflicts_long_setup")
+        if features.news_side == "neutral" and not high_conviction_volume:
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="neutral_news_insufficient_volume")
+        reason_codes.extend(["breakout_above_or_high", "above_vwap"])
+        if features.news_side == "long":
+            reason_codes.append("news_long")
+        elif high_conviction_volume:
+            reason_codes.append("high_volume_override")
+        snapshot["signal_reason_codes"] = reason_codes
+        return EvalResult(side="buy", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
 
-    return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=False, reject_reason="news_neutral")
+    # Short entry: close below OR low + below VWAP
+    if close < or_low and vwap is not None and price < vwap:
+        if features.news_side == "long":
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="news_conflicts_short_setup")
+        if features.news_side == "neutral" and not high_conviction_volume:
+            return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="neutral_news_insufficient_volume")
+        reason_codes.extend(["breakdown_below_or_low", "below_vwap"])
+        if features.news_side == "short":
+            reason_codes.append("news_short")
+        elif high_conviction_volume:
+            reason_codes.append("high_volume_override")
+        snapshot["signal_reason_codes"] = reason_codes
+        return EvalResult(side="sell", reason_codes=reason_codes, feature_snapshot=snapshot, passes_filters=True, reject_reason=None)
+
+    return EvalResult(side=None, reason_codes=[], feature_snapshot=snapshot, passes_filters=True, reject_reason="entry_conditions_not_met")
 
 
 def exit_stop_target_prices(side: str, or_high: Decimal, or_low: Decimal, entry_price: Decimal, r_mult: float = 2.0) -> tuple[Decimal, Decimal]:
