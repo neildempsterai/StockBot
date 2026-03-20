@@ -6,6 +6,7 @@ export const ENDPOINTS = {
   healthDetail: '/health/detail',
   config: '/v1/config',
   runtimeStatus: '/v1/runtime/status',
+  workerTelemetry: '/v1/runtime/worker-telemetry',
   strategies: '/v1/strategies',
   signals: '/v1/signals',
   signalDetail: (uuid: string) => `/v1/signals/${uuid}`,

@@ -40,6 +40,7 @@ from stockbot.shadow.engine import (
     ShadowPosition,
     ShadowState,
     close_shadow_position,
+    partial_close_shadow_position,
     compute_entry_fill,
     compute_exit_fill,
     resolve_exit_conservative,
@@ -338,6 +339,7 @@ async def _evaluate_symbol_with_strategy(
     keyword_hits: list[str],
     features: FeatureSet | None,
     last_bar: BarLike,
+    daily_contexts: dict[str, DailyContext] | None = None,
 ) -> bool:
     """
     Evaluate symbol with a specific strategy. Returns True if signal was emitted, False otherwise.
@@ -432,22 +434,18 @@ async def _evaluate_symbol_with_strategy(
 
         prev_close_daily = _swing_prev_close_fallback
         avg_daily_dollar_vol = None
-        try:
-            from stockbot.alpaca.client import AlpacaClient
-            snap = await asyncio.to_thread(AlpacaClient().get_snapshot, symbol)
-            if snap and snap.prev_daily_bar:
-                prev_close_daily = snap.prev_daily_bar.close
-                prev_high_daily = snap.prev_daily_bar.high
-                prev_low_daily = snap.prev_daily_bar.low
-            if snap and snap.daily_bar:
-                avg_daily_dollar_vol = (
-                    (snap.daily_bar.high + snap.daily_bar.low + snap.daily_bar.close) / 3
-                    * snap.daily_bar.volume
-                )
-                if prev_low_daily is not None:
-                    day_2_low_daily = min(prev_low_daily, snap.daily_bar.low) if snap.daily_bar.low else prev_low_daily
-        except Exception as e:
-            logger.debug("swing_daily_data_fetch_failed symbol=%s error=%s", symbol, e)
+        dc = (daily_contexts or {}).get(symbol)
+        if dc and dc.daily_bars:
+            last_daily = dc.daily_bars[-1]
+            if len(dc.daily_bars) >= 2:
+                prev_daily = dc.daily_bars[-2]
+                prev_close_daily = prev_daily.close
+                prev_high_daily = prev_daily.high
+                prev_low_daily = prev_daily.low
+                if len(dc.daily_bars) >= 3:
+                    day_2_bar = dc.daily_bars[-3]
+                    day_2_low_daily = min(prev_low_daily, day_2_bar.low)
+            avg_daily_dollar_vol = dc.avg_daily_dollar_volume if dc.avg_daily_dollar_volume > 0 else None
 
         scrappy_dir = getattr(snapshot_row, "catalyst_direction", None) if snapshot_row else None
         scrappy_str = getattr(snapshot_row, "catalyst_strength", None) if snapshot_row else None
@@ -551,19 +549,28 @@ async def _evaluate_symbol_with_strategy(
     min_score = getattr(settings, "min_entry_quality_score", 40)
     if eval_result.side is not None:
         try:
-            _dc_sym = None  # will be populated from worker state via feature_snapshot if available
+            _dc_score = (daily_contexts or {}).get(symbol)
             _atr_bps = None
+            if _dc_score and _dc_score.atr_14 and _dc_score.atr_14 > 0:
+                price_ref = (features.latest_last if features else None) or sym_state.latest_last or last_bar.close
+                if price_ref and price_ref > 0:
+                    _atr_bps = int(_dc_score.atr_14 / price_ref * 10000)
             _regime_label = "unknown"
-            _trend_5m = "flat"
-            _ba_imbalance = None
-            if hasattr(sym_state, 'trend_direction_5m'):
-                _trend_5m = sym_state.trend_direction_5m()
-            if hasattr(sym_state, 'bid_ask_imbalance'):
-                _ba_imbalance = sym_state.bid_ask_imbalance()
+            _trend_5m = sym_state.trend_direction_5m()
+            _ba_imbalance = sym_state.bid_ask_imbalance()
+
+            # Breakout distance vs ATR
+            _breakout_vs_atr = None
+            if _dc_score and _dc_score.atr_14 and _dc_score.atr_14 > 0 and or_high is not None:
+                price_ref = (features.latest_last if features else None) or last_bar.close
+                if eval_result.side == "buy" and or_high:
+                    _breakout_vs_atr = (price_ref - or_high) / _dc_score.atr_14
+                elif eval_result.side == "sell" and or_low:
+                    _breakout_vs_atr = (or_low - price_ref) / _dc_score.atr_14
 
             score_components = compute_entry_score(
                 side=eval_result.side,
-                breakout_distance_vs_atr=None,
+                breakout_distance_vs_atr=_breakout_vs_atr,
                 entry_bar_rvol=features.rel_volume_5m if features else None,
                 news_side=eval_result.feature_snapshot.get("news_side", "neutral"),
                 news_keyword_count=len(eval_result.feature_snapshot.get("news_keyword_hits", [])),
@@ -771,8 +778,11 @@ async def _evaluate_symbol_with_strategy(
     elif strategy_id == INTRA_EVENT_MOMO_ID:
         stop_price, target_price = exit_stop_target_intra_event_momo(eval_result.side, or_high, or_low, real_entry, 2.0)
     elif strategy_id == SWING_EVENT_CONTINUATION_ID:
+        _dc_swing = (daily_contexts or {}).get(symbol)
+        _swing_atr = _dc_swing.atr_14 if _dc_swing else None
         stop_price, target_price = compute_stop_target_swing(
             eval_result.side, real_entry, prev_low_daily, day_2_low_daily, prev_high_daily,
+            atr=_swing_atr,
         )
     else:
         if eval_result.side == "buy":
@@ -793,15 +803,27 @@ async def _evaluate_symbol_with_strategy(
             stop_price = (real_entry + min_stop_distance).quantize(Decimal("0.01"))
             target_price = (real_entry - min_stop_distance * Decimal("2")).quantize(Decimal("0.01"))
     
-    # Shadow sizing: risk-based using notional equity instead of hardcoded 100
+    # Shadow sizing: risk-based using notional equity, ATR-adjusted
     shadow_equity = Decimal(str(getattr(settings, "shadow_notional_equity", 100000)))
     stop_dist_shadow = abs(real_entry - stop_price)
+    _dc_sizing = (daily_contexts or {}).get(symbol)
+    _atr_sizing = _dc_sizing.atr_14 if _dc_sizing else None
+    if _atr_sizing and _atr_sizing > 0:
+        atr_floor = _atr_sizing * Decimal("1.5")
+        stop_dist_shadow = max(stop_dist_shadow, atr_floor)
     if stop_dist_shadow > 0 and shadow_equity > 0 and real_entry > 0:
         risk_pct = Decimal("0.005")  # 0.5% risk per trade for shadow
+        if eval_result.side == "sell":
+            risk_pct = risk_pct * Decimal(str(getattr(settings, "short_risk_multiplier", 0.75)))
         shadow_risk_dollars = shadow_equity * risk_pct
         qty = (shadow_risk_dollars / stop_dist_shadow).to_integral_value(rounding="ROUND_FLOOR")
         qty = max(qty, Decimal("1"))
         max_shadow_qty = (shadow_equity * Decimal("0.1") / real_entry).to_integral_value(rounding="ROUND_FLOOR")
+        # Liquidity cap for shadow too
+        if _dc_sizing and _dc_sizing.avg_daily_volume > 0:
+            adv_cap = Decimal(str(int(_dc_sizing.avg_daily_volume * getattr(settings, "max_pct_of_adv", 1.0) / 100)))
+            if adv_cap > 0:
+                qty = min(qty, adv_cap)
         qty = min(qty, max_shadow_qty, Decimal("5000"))
     else:
         qty = Decimal("100")
@@ -1465,6 +1487,54 @@ async def run_worker() -> None:
 
             await _save_last_ids(redis_client, last_ids)
 
+            # Publish position runtime state (trailing phase, quality scores) to Redis
+            if trailing_states or shadow_state.symbols_with_positions():
+                pos_runtime = {}
+                for sym in shadow_state.symbols_with_positions():
+                    pos = shadow_state.get_position(sym)
+                    if pos:
+                        sig_key = str(pos.signal_uuid)
+                        ts_s = trailing_states.get(sig_key)
+                        pos_runtime[sym] = {
+                            "quality_score": pos.quality_score,
+                            "trailing_stop_phase": ts_s.trail_phase if ts_s else "initial",
+                            "current_stop": str(ts_s.current_stop) if ts_s else None,
+                            "original_stop": str(pos.original_stop_price) if pos.original_stop_price else None,
+                            "high_water_mark": str(ts_s.high_water_mark) if ts_s else None,
+                            "partial_exits_done": list(ts_s.partial_exits_done) if ts_s else [],
+                        }
+                if pos_runtime:
+                    try:
+                        await redis_client.set("worker:position_runtime", json.dumps(pos_runtime), ex=120)
+                    except Exception:
+                        pass  # non-critical telemetry
+                # Also publish regime and circuit breaker state
+                runtime_meta: dict[str, Any] = {}
+                if current_regime:
+                    runtime_meta["regime"] = {
+                        "label": current_regime.label,
+                        "confidence": current_regime.confidence,
+                        "spy_above_vwap": current_regime.spy_above_vwap,
+                    }
+                if portfolio_risk:
+                    p_state = portfolio_risk.get_state(
+                        len(shadow_state.intraday_positions()),
+                        len(shadow_state.swing_positions()),
+                    )
+                    runtime_meta["circuit_breaker"] = {
+                        "daily_pnl": str(p_state.daily_realized_pnl),
+                        "trades_today": p_state.trades_today,
+                        "wins": p_state.wins_today,
+                        "losses": p_state.losses_today,
+                        "breaker_active": p_state.circuit_breaker_active,
+                        "total_positions": p_state.total_open_positions,
+                    }
+                if runtime_meta:
+                    try:
+                        await redis_client.set("worker:runtime_meta", json.dumps(runtime_meta), ex=120)
+                    except Exception:
+                        pass
+
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -1663,6 +1733,46 @@ async def _on_bar(
                 pos.stop_price = trail_action.new_stop
                 logger.debug("trailing_stop_updated symbol=%s new_stop=%s reason=%s phase=%s",
                              symbol, trail_action.new_stop, trail_action.reason, trail_action.trail_phase)
+
+            # Partial profit-taking
+            if getattr(settings, "partial_exit_enabled", True):
+                partial_action = check_partial_exit(
+                    ts_state, last_bar.close,
+                    partial_at_1r_pct=getattr(settings, "partial_exit_pct_at_1r", 50),
+                    partial_at_2r_pct=getattr(settings, "partial_exit_pct_at_2r", 25),
+                )
+                if partial_action and partial_action.exit_qty_pct:
+                    bid_p = sym_state.latest_bid or last_bar.close
+                    ask_p = sym_state.latest_ask or last_bar.close
+                    exit_ideal_p = compute_exit_fill(pos.side, bid_p, ask_p, ShadowFillParams("ideal", 0, Decimal("0")))
+                    exit_real_p = compute_exit_fill(pos.side, bid_p, ask_p, ShadowFillParams("realistic", slippage_bps, fee_per_share))
+                    partial_records, remaining_qty = partial_close_shadow_position(
+                        pos, last_bar.timestamp, exit_ideal_p, exit_real_p,
+                        partial_action.reason, partial_action.exit_qty_pct,
+                    )
+                    if remaining_qty > 0:
+                        pos.qty = remaining_qty
+                        factory_partial = get_session_factory()
+                        async with factory_partial() as session_partial:
+                            store_partial = LedgerStore(session_partial)
+                            for rec in partial_records:
+                                await store_partial.insert_shadow_trade(
+                                    signal_uuid=UUID(rec["signal_uuid"]),
+                                    execution_mode=rec["execution_mode"],
+                                    entry_ts=rec["entry_ts"], exit_ts=rec["exit_ts"],
+                                    entry_price=rec["entry_price"], exit_price=rec["exit_price"],
+                                    stop_price=rec["stop_price"], target_price=rec["target_price"],
+                                    exit_reason=rec["exit_reason"], qty=rec["qty"],
+                                    gross_pnl=rec["gross_pnl"], net_pnl=rec["net_pnl"],
+                                    slippage_bps=rec["slippage_bps"], fee_per_share=rec["fee_per_share"],
+                                    scrappy_mode=scrappy_mode,
+                                )
+                        if portfolio_risk:
+                            for rec in partial_records:
+                                if rec.get("execution_mode") == "realistic":
+                                    portfolio_risk.record_trade_exit(rec["net_pnl"])
+                        logger.info("partial_exit symbol=%s reason=%s exit_qty_pct=%s remaining=%s signal_uuid=%s",
+                                    symbol, partial_action.reason, partial_action.exit_qty_pct, remaining_qty, str(pos.signal_uuid))
 
             if pos.holding_period_type != "swing" and getattr(settings, "time_decay_exit_enabled", True):
                 import zoneinfo as _zi_td
@@ -1887,7 +1997,6 @@ async def _on_bar(
         if strategy_config.holding_period_type != "swing" and features is None:
             continue
 
-        # Evaluate with this strategy (swing uses features=None but builds SwingFeatureSet internally)
         signal_emitted = await _evaluate_symbol_with_strategy(
             redis_client=redis_client,
             sym_state=sym_state,
@@ -1902,6 +2011,7 @@ async def _on_bar(
             keyword_hits=keyword_hits,
             features=features,
             last_bar=last_bar,
+            daily_contexts=daily_contexts,
         )
 
         if signal_emitted:

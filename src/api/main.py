@@ -27,6 +27,10 @@ from stockbot.ai_referee.store import (
 )
 from stockbot.alpaca.client import AlpacaClient
 from stockbot.config import get_settings
+from stockbot.strategies.open_drive_momo import STRATEGY_VERSION as ODM_VERSION
+from stockbot.strategies.intra_event_momo import STRATEGY_VERSION as IEM_VERSION
+from stockbot.strategies.intraday_continuation import STRATEGY_VERSION as IC_VERSION
+from stockbot.strategies.swing_event_continuation import STRATEGY_VERSION as SEC_VERSION
 from stockbot.execution.paper_test import (
     get_paper_test_status,
     run_buy_cover,
@@ -380,6 +384,25 @@ async def runtime_status() -> dict:
     return out
 
 
+@app.get("/v1/runtime/worker-telemetry")
+async def runtime_worker_telemetry() -> dict:
+    """Live worker telemetry: position runtime state, regime, circuit breaker."""
+    try:
+        r = redis.from_url(get_settings().redis_url, decode_responses=True)
+        pos_raw = await r.get("worker:position_runtime")
+        meta_raw = await r.get("worker:runtime_meta")
+        await r.aclose()
+        pos_data = json.loads(pos_raw) if pos_raw else {}
+        meta_data = json.loads(meta_raw) if meta_raw else {}
+        return {
+            "positions": pos_data,
+            "regime": meta_data.get("regime"),
+            "circuit_breaker": meta_data.get("circuit_breaker"),
+        }
+    except Exception as e:
+        return {"positions": {}, "regime": None, "circuit_breaker": None, "error": str(e)[:200]}
+
+
 def _replay_sessions() -> list[dict]:
     """Discover replay sessions from replay/ dir (if present)."""
     # API may run in Docker without replay/; repo root relative to this file.
@@ -431,9 +454,9 @@ async def list_strategies() -> dict:
     strategies = [
         {
             "strategy_id": "OPEN_DRIVE_MOMO",
-            "strategy_version": "0.1.0",
+            "strategy_version": ODM_VERSION,
             "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_open_drive_paper_enabled", True) else "shadow-only",
-            "entry_window_et": "09:35-11:30",
+            "entry_window_et": "09:35-10:00",
             "force_flat_et": "15:45",
             "enabled": getattr(settings, "strategy_open_drive_enabled", True),
             "paper_enabled": getattr(settings, "strategy_open_drive_paper_enabled", True),
@@ -441,7 +464,7 @@ async def list_strategies() -> dict:
         },
         {
             "strategy_id": "INTRADAY_CONTINUATION",
-            "strategy_version": "0.1.0",
+            "strategy_version": IC_VERSION,
             "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_intraday_continuation_paper_enabled", False) else "shadow-only",
             "entry_window_et": "10:30-14:30",
             "force_flat_et": "15:45",
@@ -451,7 +474,7 @@ async def list_strategies() -> dict:
         },
         {
             "strategy_id": "INTRA_EVENT_MOMO",
-            "strategy_version": "0.1.0",
+            "strategy_version": IEM_VERSION,
             "mode": "shadow-only",
             "entry_window_et": "09:35-11:30",
             "force_flat_et": "15:45",
@@ -462,7 +485,7 @@ async def list_strategies() -> dict:
         },
         {
             "strategy_id": "SWING_EVENT_CONTINUATION",
-            "strategy_version": "0.1.0",
+            "strategy_version": SEC_VERSION,
             "mode": "paper" if exec_mode == "paper" and getattr(settings, "strategy_swing_event_continuation_paper_enabled", False) else "shadow-only",
             "entry_window_et": "13:00-15:30",
             "force_flat_et": None,
@@ -2706,7 +2729,7 @@ async def _get_strategy_eligibility_for_symbol(
     configs = []
     configs.append(StrategyConfig(
         strategy_id="OPEN_DRIVE_MOMO",
-        strategy_version="0.1.0",
+        strategy_version=ODM_VERSION,
         entry_start_et=getattr(settings, "open_drive_entry_start_et", "09:35"),
         entry_end_et=getattr(settings, "open_drive_entry_end_et", "11:30"),
         force_flat_et=getattr(settings, "force_flat_et", "15:45"),
@@ -2716,7 +2739,7 @@ async def _get_strategy_eligibility_for_symbol(
 
     configs.append(StrategyConfig(
         strategy_id="INTRADAY_CONTINUATION",
-        strategy_version="0.1.0",
+        strategy_version=IC_VERSION,
         entry_start_et=getattr(settings, "intraday_entry_start_et", "10:30"),
         entry_end_et=getattr(settings, "intraday_entry_end_et", "14:30"),
         force_flat_et=getattr(settings, "force_flat_et", "15:45"),
@@ -2727,7 +2750,7 @@ async def _get_strategy_eligibility_for_symbol(
     intra_event_enabled = getattr(settings, "strategy_intra_event_momo_enabled", False)
     configs.append(StrategyConfig(
         strategy_id="INTRA_EVENT_MOMO",
-        strategy_version="0.1.0",
+        strategy_version=IEM_VERSION,
         entry_start_et=getattr(settings, "entry_start_et", "09:35"),
         entry_end_et=getattr(settings, "entry_end_et", "11:30"),
         force_flat_et=getattr(settings, "force_flat_et", "15:45"),
@@ -2739,7 +2762,7 @@ async def _get_strategy_eligibility_for_symbol(
     swing_paper = getattr(settings, "strategy_swing_event_continuation_paper_enabled", False)
     configs.append(StrategyConfig(
         strategy_id="SWING_EVENT_CONTINUATION",
-        strategy_version="0.1.0",
+        strategy_version=SEC_VERSION,
         entry_start_et="13:00",
         entry_end_et="15:30",
         force_flat_et=None,

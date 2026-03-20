@@ -13,6 +13,7 @@ import type {
   ScrappyStatusResponse,
   ScannerSummaryResponse,
   IntelligenceSummaryResponse,
+  WorkerTelemetryResponse,
 } from '../types/api';
 import { KPICard } from '../components/shared/KPICard';
 import { LoadingSkeleton } from '../components/shared/LoadingSkeleton';
@@ -66,6 +67,11 @@ export function CommandCenter() {
     queryKey: ['runtimeStatus'],
     queryFn: () => apiGet<RuntimeStatusResponse>(ENDPOINTS.runtimeStatus),
     refetchInterval: 30_000,
+  });
+  const { data: workerTelemetry } = useQuery({
+    queryKey: ['workerTelemetry'],
+    queryFn: () => apiGet<WorkerTelemetryResponse>(ENDPOINTS.workerTelemetry),
+    refetchInterval: 10_000,
   });
   const { data: scrappyStatus } = useQuery({
     queryKey: ['scrappyStatus'],
@@ -125,6 +131,71 @@ export function CommandCenter() {
       </div>
 
       <SafetyStrip />
+
+      {/* Risk Management Status */}
+      {runtimeStatus?.risk_management && (
+        <section className="dashboard-section">
+          <SectionHeader title="Risk Management" subtitle="Portfolio-level controls and dynamic exit management" />
+          <div className="kpi-grid">
+            <KPICard title="Daily Loss Limit" value={`${runtimeStatus.risk_management.max_daily_loss_pct ?? 3}%`} />
+            <KPICard title="Portfolio Heat Cap" value={`${runtimeStatus.risk_management.max_portfolio_heat_pct ?? 5}%`} />
+            <KPICard title="Max Positions" value={String(runtimeStatus.risk_management.max_total_concurrent_positions ?? 6)} />
+            <KPICard title="Entry Quality Min" value={String(runtimeStatus.risk_management.min_entry_quality_score ?? 40)} />
+            <KPICard title="Trailing Stops" value={runtimeStatus.risk_management.trailing_stop_enabled ? 'Active' : 'Off'} />
+            <KPICard title="Partial Exits" value={runtimeStatus.risk_management.partial_exit_enabled ? 'Active' : 'Off'} />
+            <KPICard title="Max Short Positions" value={String(runtimeStatus.risk_management.short_max_concurrent ?? 2)} />
+            <KPICard title="Short Exposure Cap" value={`${runtimeStatus.risk_management.max_short_gross_exposure_pct ?? 15}%`} />
+          </div>
+        </section>
+      )}
+
+      {/* Market Regime & Circuit Breaker */}
+      {workerTelemetry && (workerTelemetry.regime || workerTelemetry.circuit_breaker) && (
+        <section className="dashboard-section">
+          <SectionHeader title="Market Regime & Circuit Breaker" subtitle="Live worker intelligence state" />
+          <div className="kpi-grid">
+            {workerTelemetry.regime && (
+              <>
+                <KPICard
+                  title="Regime"
+                  value={workerTelemetry.regime.label ?? 'unknown'}
+                  valueClass={
+                    workerTelemetry.regime.label === 'trending_up' ? 'pnl--positive' :
+                    workerTelemetry.regime.label === 'trending_down' ? 'pnl--negative' : ''
+                  }
+                />
+                <KPICard
+                  title="SPY > VWAP"
+                  value={workerTelemetry.regime.spy_above_vwap ? 'Yes' : 'No'}
+                  valueClass={workerTelemetry.regime.spy_above_vwap ? 'pnl--positive' : 'pnl--negative'}
+                />
+                <KPICard
+                  title="Regime Confidence"
+                  value={`${((workerTelemetry.regime.confidence ?? 0) * 100).toFixed(0)}%`}
+                />
+              </>
+            )}
+            {workerTelemetry.circuit_breaker && (
+              <>
+                <KPICard
+                  title="Circuit Breaker"
+                  value={workerTelemetry.circuit_breaker.breaker_active ? 'ACTIVE' : 'Clear'}
+                  valueClass={workerTelemetry.circuit_breaker.breaker_active ? 'pnl--negative' : 'pnl--positive'}
+                />
+                <KPICard
+                  title="Daily P&L"
+                  value={workerTelemetry.circuit_breaker.daily_pnl ? `$${parseFloat(workerTelemetry.circuit_breaker.daily_pnl).toFixed(2)}` : '$0.00'}
+                  valueClass={parseFloat(workerTelemetry.circuit_breaker.daily_pnl ?? '0') >= 0 ? 'pnl--positive' : 'pnl--negative'}
+                />
+                <KPICard
+                  title="Trades Today"
+                  value={`${workerTelemetry.circuit_breaker.wins ?? 0}W / ${workerTelemetry.circuit_breaker.losses ?? 0}L`}
+                />
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Active Strategies */}
       {allStrategies.length > 0 && (
@@ -214,6 +285,8 @@ export function CommandCenter() {
                     <th>Side</th>
                     <th>Type</th>
                     <th>Qty</th>
+                    <th>Quality</th>
+                    <th>Trail Phase</th>
                     <th>Status</th>
                     <th>Stop</th>
                     <th>Target</th>
@@ -237,6 +310,20 @@ export function CommandCenter() {
                         </span>
                       </td>
                       <td>{pos.qty}</td>
+                      <td>
+                        {(() => {
+                          const wt = workerTelemetry?.positions?.[pos.symbol];
+                          const qs = wt?.quality_score ?? pos.quality_score;
+                          return qs != null ? (
+                            <span className={`badge ${qs >= 70 ? 'badge--success' : qs >= 50 ? 'badge--warning' : 'badge--danger'}`}>
+                              {qs}
+                            </span>
+                          ) : '—';
+                        })()}
+                      </td>
+                      <td className="cell--small cell--muted">
+                        {workerTelemetry?.positions?.[pos.symbol]?.trailing_stop_phase ?? pos.trailing_stop_phase ?? '—'}
+                      </td>
                       <td><ManagedStatusBadge status={pos.managed_status} /></td>
                       <td>{pos.stop_price != null ? formatMoney(pos.stop_price) : '—'}</td>
                       <td>{pos.target_price != null ? formatMoney(pos.target_price) : '—'}</td>

@@ -144,9 +144,11 @@ def _close_one(
     exit_price: Decimal,
     exit_reason: str,
     execution_mode: str,
+    qty_override: Decimal | None = None,
 ) -> dict[str, Any]:
-    gross = _gross_pnl(position.side, position.qty, entry_price, exit_price)
-    fees = _fees(position.qty, position.fee_per_share) * 2
+    qty = qty_override if qty_override is not None else position.qty
+    gross = _gross_pnl(position.side, qty, entry_price, exit_price)
+    fees = _fees(qty, position.fee_per_share) * 2
     net = gross - fees
     return {
         "signal_uuid": str(position.signal_uuid),
@@ -158,7 +160,7 @@ def _close_one(
         "stop_price": position.stop_price,
         "target_price": position.target_price,
         "exit_reason": exit_reason,
-        "qty": position.qty,
+        "qty": qty,
         "gross_pnl": gross,
         "net_pnl": net,
         "slippage_bps": position.slippage_bps,
@@ -186,6 +188,31 @@ def close_shadow_position(
             exit_reason, "realistic",
         ),
     ]
+
+
+def partial_close_shadow_position(
+    position: ShadowPosition,
+    exit_ts: datetime,
+    exit_price_ideal: Decimal,
+    exit_price_realistic: Decimal,
+    exit_reason: str,
+    exit_qty_pct: Decimal,
+) -> tuple[list[dict[str, Any]], Decimal]:
+    """Close a fraction of a position. Returns (records, remaining_qty).
+
+    The position's qty is NOT modified here -- caller must update it.
+    """
+    exit_qty = (position.qty * exit_qty_pct).to_integral_value(rounding="ROUND_FLOOR")
+    exit_qty = max(exit_qty, Decimal("1"))
+    exit_qty = min(exit_qty, position.qty)
+    remaining = position.qty - exit_qty
+    records = [
+        _close_one(position, exit_ts, position.ideal_entry_price, exit_price_ideal,
+                    exit_reason, "ideal", qty_override=exit_qty),
+        _close_one(position, exit_ts, position.realistic_entry_price, exit_price_realistic,
+                    exit_reason, "realistic", qty_override=exit_qty),
+    ]
+    return records, remaining
 
 
 class ShadowState:

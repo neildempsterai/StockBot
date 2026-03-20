@@ -368,7 +368,35 @@ export interface PaperExposurePosition {
   days_held?: number;
   overnight_carry?: boolean;
   overnight_carry_count?: number;
+  quality_score?: number;
+  trailing_stop_phase?: string;
+  original_stop_price?: number;
+  partial_exits_done?: string[];
   [key: string]: unknown;
+}
+
+export interface WorkerTelemetryResponse {
+  positions?: Record<string, {
+    quality_score?: number;
+    trailing_stop_phase?: string;
+    current_stop?: string;
+    original_stop?: string;
+    high_water_mark?: string;
+    partial_exits_done?: string[];
+  }>;
+  regime?: {
+    label?: string;
+    confidence?: number;
+    spy_above_vwap?: boolean;
+  };
+  circuit_breaker?: {
+    daily_pnl?: string;
+    trades_today?: number;
+    wins?: number;
+    losses?: number;
+    breaker_active?: boolean;
+    total_positions?: number;
+  };
 }
 
 export interface RuntimeStatusResponse {
@@ -377,10 +405,21 @@ export interface RuntimeStatusResponse {
     version?: string;
     execution_mode?: string;
     paper_execution_enabled?: boolean;
+    active_strategies?: string[];
   };
   market_data?: {
     feed?: string;
     extended_hours_enabled?: boolean;
+  };
+  risk_management?: {
+    max_daily_loss_pct?: number;
+    max_portfolio_heat_pct?: number;
+    max_total_concurrent_positions?: number;
+    trailing_stop_enabled?: boolean;
+    partial_exit_enabled?: boolean;
+    min_entry_quality_score?: number;
+    short_max_concurrent?: number;
+    max_short_gross_exposure_pct?: number;
   };
   paper_execution?: {
     supported_end_to_end?: boolean;
