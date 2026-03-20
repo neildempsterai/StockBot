@@ -317,6 +317,7 @@ async def run_scrappy(
                 errors=errors_str,
             )
             # Persist symbol intelligence snapshots for strategy bridge
+            snapshots_updated = 0
             for sym in (run_scope.get("symbols") or []):
                 if not sym or not isinstance(sym, str):
                     continue
@@ -328,6 +329,7 @@ async def run_scrappy(
                         sym.strip().upper()[:32], notes, scrappy_run_id=run_id
                     )
                     await insert_intelligence_snapshot_from_snapshot(session, snap)
+                    snapshots_updated += 1
                 except Exception as e:
                     logger.warning("snapshot_persist_failed symbol=%s run_id=%s error=%s", sym, run_id, e)
             return {
@@ -341,6 +343,7 @@ async def run_scrappy(
                 "notes_created": notes_created,
                 "notes_attempted_count": notes_attempted_count,
                 "notes_rejected_count": notes_rejected_count,
+                "snapshots_updated": snapshots_updated,
                 "outcome_code": outcome,
                 "note_ids": note_ids,
             }

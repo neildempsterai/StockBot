@@ -2033,15 +2033,38 @@ async def get_scanner_summary() -> dict:
 async def get_opportunities_now() -> dict:
     """Top current candidates (live only). Prefers opportunity engine; includes Scrappy enrichment when present."""
     from stockbot.opportunities.service import get_latest_opportunity_run_and_candidates
+    from stockbot.scanner.store import get_latest_live_scanner_result
+    from sqlalchemy import select
+    from stockbot.db.models import ScannerCandidateRow
     run_id, updated_at, candidates = await get_latest_opportunity_run_and_candidates()
     if run_id and candidates:
         opportunities = []
         scrappy_symbols = [c["symbol"] for c in candidates if c.get("scrappy_present")]
         snapshot_map: dict[str, SymbolIntelligenceSnapshot] = {}
+        market_data_map: dict[str, dict] = {}  # symbol -> {price, gap_pct, spread_bps}
         factory = get_session_factory()
         async with factory() as session:
             snapshot_map = await _get_latest_snapshots_for_symbols(session, scrappy_symbols)
+            # Fetch market data (price/gap/spread) from latest live scanner run for each symbol
+            scanner_result = await get_latest_live_scanner_result(session)
+            if scanner_result and scanner_result.run_id:
+                symbol_list = [c["symbol"] for c in candidates]
+                if symbol_list:
+                    r = await session.execute(
+                        select(ScannerCandidateRow)
+                        .where(ScannerCandidateRow.run_id == scanner_result.run_id)
+                        .where(ScannerCandidateRow.symbol.in_(symbol_list))
+                    )
+                    scanner_rows = r.scalars().all()
+                    for row in scanner_rows:
+                        market_data_map[row.symbol.upper()] = {
+                            "price": float(row.price) if row.price is not None else None,
+                            "gap_pct": row.gap_pct,
+                            "spread_bps": row.spread_bps,
+                        }
         for c in candidates:
+            symbol_upper = (c["symbol"] or "").upper()
+            market_data = market_data_map.get(symbol_upper, {})
             base = {
                 "symbol": c["symbol"],
                 "rank": c["rank"],
@@ -2052,12 +2075,12 @@ async def get_opportunities_now() -> dict:
                 "inclusion_reasons": c.get("inclusion_reasons") or [],
                 "component_scores": {},
                 "reason_codes": c.get("inclusion_reasons") or [],
-                "price": None,
-                "gap_pct": None,
-                "spread_bps": None,
+                "price": market_data.get("price"),
+                "gap_pct": market_data.get("gap_pct"),
+                "spread_bps": market_data.get("spread_bps"),
                 "scrappy_present": c.get("scrappy_present", False),
             }
-            snap = snapshot_map.get((c["symbol"] or "").strip())
+            snap = snapshot_map.get(symbol_upper)
             if snap:
                 base.update(_snapshot_to_scrappy_enrichment(snap))
             opportunities.append(base)
@@ -2221,9 +2244,11 @@ async def get_opportunities_symbol(symbol: str) -> dict:
 
 @app.get("/v1/scrappy/status")
 async def get_scrappy_status() -> dict:
-    """Scrappy automation status: last auto-run, watchlist size, auto-enabled."""
+    """Scrappy automation status: last auto-run, watchlist size, auto-enabled, with truthful failure tracking."""
     from stockbot.config import get_settings
     from stockbot.scrappy.run_service import get_watchlist_symbols_list
+    import redis.asyncio as redis
+    import json
     settings = get_settings()
     auto_enabled = getattr(settings, "scrappy_auto_enabled", True)
     watchlist = await get_watchlist_symbols_list()
@@ -2233,12 +2258,45 @@ async def get_scrappy_status() -> dict:
             select(ScrappyAutoRun).order_by(ScrappyAutoRun.run_ts.desc()).limit(1)
         )
         last_auto = r.scalars().first()
+    
+    # Get Redis state for last attempt, failure reason, symbols
+    last_attempt_ts = None
+    last_failure_reason = None
+    last_outcome = None
+    last_symbols_requested = []
+    last_symbols_researched = []
+    try:
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        last_attempt_ts = await r.get("stockbot:scrappy_auto:last_attempt_ts")
+        last_failure_reason = await r.get("stockbot:scrappy_auto:last_failure_reason")
+        last_outcome = await r.get("stockbot:scrappy_auto:last_outcome")
+        symbols_req_json = await r.get("stockbot:scrappy_auto:last_symbols_requested")
+        symbols_res_json = await r.get("stockbot:scrappy_auto:last_symbols_researched")
+        await r.aclose()
+        if symbols_req_json:
+            try:
+                last_symbols_requested = json.loads(symbols_req_json)
+            except Exception:
+                pass
+        if symbols_res_json:
+            try:
+                last_symbols_researched = json.loads(symbols_res_json)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
     return {
         "scrappy_auto_enabled": auto_enabled,
         "last_run_at": last_auto.run_ts.isoformat() if last_auto and last_auto.run_ts else None,
+        "last_attempt_at": last_attempt_ts,
         "last_run_id": last_auto.run_id if last_auto else None,
+        "last_outcome": last_outcome or (last_auto.status if last_auto else None),
+        "last_failure_reason": last_failure_reason,
         "last_notes_created": last_auto.notes_created if last_auto else 0,
         "last_snapshots_updated": last_auto.snapshots_updated if last_auto else 0,
+        "last_symbols_requested": last_symbols_requested,
+        "last_symbols_researched": last_symbols_researched,
         "watchlist_size": len(watchlist) if watchlist else 0,
     }
 

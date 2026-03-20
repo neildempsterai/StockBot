@@ -246,7 +246,9 @@ export function IntelligenceCenter() {
             subtitle={
               scrappyStatus?.last_run_at
                 ? `Last: ${formatTs(scrappyStatus.last_run_at)}`
-                : 'Not run yet'
+                : scrappyStatus?.last_attempt_at
+                  ? `Last attempt: ${formatTs(scrappyStatus.last_attempt_at)}`
+                  : 'Not run yet'
             }
           />
           <KPICard
@@ -310,6 +312,101 @@ export function IntelligenceCenter() {
             <strong>✓ Paper Trading Ready:</strong> All prerequisites satisfied
           </div>
         )}
+        
+        {/* Critical Premarket Health */}
+        <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: 'var(--color-bg-secondary, #1a1a1a)', borderRadius: '4px', border: '1px solid var(--color-border)' }}>
+          <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1rem' }}>Premarket Health Status</h3>
+          <div className="grid-cards grid-cards--3" style={{ marginBottom: '0.75rem' }}>
+            <KPICard
+              title="Scanner Last Run"
+              value={scannerSummary?.last_run_ts ? formatTs(scannerSummary.last_run_ts) : 'Never'}
+              valueClass={scannerLive ? 'pnl--positive' : ''}
+              subtitle={scannerSummary?.last_run_status ?? '—'}
+            />
+            <KPICard
+              title="Opportunity Last Run"
+              value={opportunities?.updated_at ? formatTs(opportunities.updated_at) : 'Never'}
+              subtitle={opportunitiesSummary?.source ?? '—'}
+            />
+            <KPICard
+              title="Scrappy Last Success"
+              value={scrappyStatus?.last_run_at ? formatTs(scrappyStatus.last_run_at) : 'Never'}
+              valueClass={scrappyStatus?.last_run_at ? 'pnl--positive' : 'pnl--negative'}
+              subtitle={
+                scrappyStatus?.last_snapshots_updated != null
+                  ? `${scrappyStatus.last_snapshots_updated} snapshots`
+                  : undefined
+              }
+            />
+          </div>
+          {scrappyStatus?.last_failure_reason && (
+            <div className="info-note" style={{ marginTop: '0.5rem', borderLeft: '3px solid var(--color-error)', backgroundColor: 'var(--color-error-bg, #2d1b1b)' }}>
+              <strong>⚠ Scrappy Last Failure:</strong> {scrappyStatus.last_failure_reason}
+            </div>
+          )}
+          {scrappyStatus?.last_symbols_requested && scrappyStatus.last_symbols_requested.length > 0 && (
+            <p className="muted-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+              Last requested: {scrappyStatus.last_symbols_requested.slice(0, 10).join(', ')}
+              {scrappyStatus.last_symbols_requested.length > 10 ? ` +${scrappyStatus.last_symbols_requested.length - 10} more` : ''}
+            </p>
+          )}
+          <div className="grid-cards grid-cards--4" style={{ marginTop: '0.75rem' }}>
+            <KPICard
+              title="Focus Symbols"
+              value={focusSymbols.length}
+            />
+            <KPICard
+              title="With Fresh Research"
+              value={focusWithFreshIntelligence}
+              valueClass={focusWithFreshIntelligence > 0 ? 'pnl--positive' : ''}
+            />
+            <KPICard
+              title="Needing Research"
+              value={focusMissingIntelligence}
+              valueClass={focusMissingIntelligence > 0 ? 'pnl--negative' : ''}
+            />
+            <KPICard
+              title="Assessed by AI"
+              value={focusSymbols.filter((o) => aiRefereeMap.has(o.symbol?.toUpperCase())).length}
+              subtitle={`${focusSymbols.length - focusSymbols.filter((o) => aiRefereeMap.has(o.symbol?.toUpperCase())).length} need assessment`}
+            />
+          </div>
+          {/* Overall Premarket Alive Status */}
+          {(() => {
+            const scrappyRecent = scrappyStatus?.last_run_at && (() => {
+              const lastRun = new Date(scrappyStatus.last_run_at);
+              const ageMinutes = (Date.now() - lastRun.getTime()) / 60000;
+              return ageMinutes < 60; // Recent if < 1 hour
+            })();
+            const hasFocusSymbols = focusSymbols.length > 0;
+            const hasFreshResearch = focusWithFreshIntelligence > 0;
+            const scannerActive = scannerLive;
+            
+            let aliveStatus = 'not_running';
+            let aliveClass = 'pnl--negative';
+            let aliveMessage = 'Premarket not running';
+            
+            if (scannerActive && hasFocusSymbols && scrappyRecent && hasFreshResearch) {
+              aliveStatus = 'alive';
+              aliveClass = 'pnl--positive';
+              aliveMessage = 'Premarket alive: Scanner active, focus symbols identified, fresh research coverage';
+            } else if (scannerActive && hasFocusSymbols && (scrappyRecent || !scrappyStatus?.last_run_at)) {
+              aliveStatus = 'degraded';
+              aliveClass = 'pnl--negative';
+              aliveMessage = 'Premarket degraded: Scanner active but research coverage missing or stale';
+            } else if (scannerActive) {
+              aliveStatus = 'partial';
+              aliveClass = '';
+              aliveMessage = 'Premarket partial: Scanner active but no focus symbols or research yet';
+            }
+            
+            return (
+              <div className="info-note" style={{ marginTop: '1rem', borderLeft: `3px solid var(--color-${aliveStatus === 'alive' ? 'success' : aliveStatus === 'degraded' ? 'error' : 'warning'})`, backgroundColor: `var(--color-${aliveStatus === 'alive' ? 'success' : aliveStatus === 'degraded' ? 'error' : 'warning'}-bg, #2d2b1b)` }}>
+                <strong>{aliveStatus === 'alive' ? '✓' : aliveStatus === 'degraded' ? '⚠' : '○'} {aliveMessage}</strong>
+              </div>
+            );
+          })()}
+        </div>
       </section>
 
       {/* Focus Board */}
@@ -361,19 +458,38 @@ export function IntelligenceCenter() {
                   const hasConflictedIntelligence = snapshot?.conflict_flag;
                   const hasAiAssessment = aiAssessment != null;
 
-                  // Determine readiness status
-                  let readinessStatus = 'watch';
+                  // Determine pipeline stage with explicit reasoning
+                  let pipelineStage = 'discovered';
+                  let stageReason = '';
+                  
                   if (hasOpenPosition) {
-                    readinessStatus = 'active';
-                  } else if (hasFreshIntelligence && hasAiAssessment) {
-                    readinessStatus = 'ready';
-                  } else if (hasIntelligence && !hasStaleIntelligence && !hasConflictedIntelligence) {
-                    readinessStatus = 'watch';
-                  } else if (hasStaleIntelligence || hasConflictedIntelligence) {
-                    readinessStatus = 'stale';
+                    pipelineStage = 'active';
+                    stageReason = 'Open paper position exists';
                   } else if (!hasIntelligence) {
-                    readinessStatus = 'missing';
+                    pipelineStage = 'missing';
+                    stageReason = 'No Scrappy snapshot - needs research';
+                  } else if (hasStaleIntelligence) {
+                    pipelineStage = 'stale';
+                    stageReason = 'Snapshot stale - research outdated';
+                  } else if (hasConflictedIntelligence) {
+                    pipelineStage = 'stale';
+                    stageReason = 'Snapshot conflicted - mixed signals';
+                  } else if (!hasAiAssessment && runtimeStatus?.ai_referee?.enabled) {
+                    pipelineStage = 'researched';
+                    stageReason = 'Research complete, awaiting AI assessment';
+                  } else if (hasFreshIntelligence && hasAiAssessment) {
+                    pipelineStage = 'ready';
+                    stageReason = 'Research fresh, AI assessed';
+                  } else if (hasIntelligence && !hasStaleIntelligence && !hasConflictedIntelligence) {
+                    pipelineStage = 'watch';
+                    stageReason = 'Research fresh, no AI assessment yet';
+                  } else {
+                    pipelineStage = 'blocked';
+                    stageReason = 'Unknown state';
                   }
+                  
+                  // Use pipelineStage for readinessStatus display
+                  const readinessStatus = pipelineStage;
 
                   return (
                     <tr
@@ -447,21 +563,16 @@ export function IntelligenceCenter() {
                           variant={
                             readinessStatus === 'ready' || readinessStatus === 'active'
                               ? 'success'
-                              : readinessStatus === 'stale' || readinessStatus === 'missing'
+                              : readinessStatus === 'stale' || readinessStatus === 'missing' || readinessStatus === 'blocked'
                                 ? 'error'
+                              : readinessStatus === 'researched'
+                                ? 'warning'
                                 : 'default'
                           }
                         />
-                        {readinessStatus === 'missing' && (
-                          <div className="muted-text" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                            Needs research
-                          </div>
-                        )}
-                        {readinessStatus === 'stale' && (
-                          <div className="muted-text" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                            Stale/conflicted
-                          </div>
-                        )}
+                        <div className="muted-text" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                          {stageReason}
+                        </div>
                       </td>
                     </tr>
                   );

@@ -224,9 +224,15 @@ export interface ScannerRunsResponse {
 export interface ScrappyStatusResponse {
   scrappy_auto_enabled?: boolean;
   last_run_at?: string;
+  last_attempt_at?: string;
+  last_run_id?: string;
+  last_outcome?: string;
+  last_failure_reason?: string;
   last_notes_created?: number;
   watchlist_size?: number;
   last_snapshots_updated?: number;
+  last_symbols_requested?: string[];
+  last_symbols_researched?: string[];
   [key: string]: unknown;
 }
 
