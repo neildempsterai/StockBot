@@ -63,3 +63,7 @@ compose-config:
 # Full-stack: compose config, migrations, up, then HTTP checks. Use API_ONLY=1 for external API only.
 runtime-truth-validate:
 	bash ./scripts/runtime_truth_validate.sh
+
+# Premarket activation validation: scanner/opportunity live, Scrappy auto-run, AI coverage, paper arming, lifecycle, degraded-state UI.
+premarket-validate:
+	bash ./scripts/premarket_validate.sh

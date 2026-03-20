@@ -1743,6 +1743,18 @@ async def scrappy_auto_run_now() -> dict:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+@app.post("/v1/ai-referee/premarket/now")
+async def ai_referee_premarket_now() -> dict:
+    """Manual trigger: run one AI Referee premarket assessment pass on focus symbols with fresh research."""
+    from stockbot.ai_referee.premarket_runner import run_ai_referee_premarket_once
+    try:
+        result = await run_ai_referee_premarket_once()
+        return result
+    except Exception as e:
+        logger.exception("ai_referee premarket/now failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
 @app.post("/v1/system/reconcile-now")
 async def system_reconcile_now() -> dict:
     """Manual trigger: run one reconciliation cycle (Alpaca account/positions/orders). Operator/debug only."""

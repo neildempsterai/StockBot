@@ -136,6 +136,17 @@ services:
       redis: { condition: service_healthy }
     restart: unless-stopped
 
+  ai_referee_premarket:
+    image: infra-app:latest
+    command: ["python", "-m", "stockbot.ai_referee.premarket_runner"]
+    env_file: [ "../.env" ]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
   ui:
     build: { context: .., dockerfile: infra/Dockerfile.ui }
     image: infra-ui:latest
