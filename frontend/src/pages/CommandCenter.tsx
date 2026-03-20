@@ -4,7 +4,6 @@ import { apiGet } from '../api/client';
 import { ENDPOINTS } from '../api/endpoints';
 import type {
   HealthResponse,
-  MetricsSummaryResponse,
   StrategiesResponse,
   OpportunitiesNowResponse,
   OpportunitiesSummaryResponse,
@@ -25,11 +24,6 @@ export function CommandCenter() {
   const { data: health, isLoading: healthLoading, isFetching: healthFetching, dataUpdatedAt } = useQuery({
     queryKey: ['health'],
     queryFn: () => apiGet<HealthResponse>(ENDPOINTS.health),
-    refetchInterval: 15_000,
-  });
-  const { data: metrics, isLoading: metricsLoading, isFetching: metricsFetching } = useQuery({
-    queryKey: ['metricsSummary'],
-    queryFn: () => apiGet<MetricsSummaryResponse>(ENDPOINTS.metricsSummary),
     refetchInterval: 15_000,
   });
   const { data: strategies } = useQuery({
@@ -57,7 +51,7 @@ export function CommandCenter() {
     refetchInterval: 15_000,
   });
 
-  if (healthLoading || metricsLoading) {
+  if (healthLoading) {
     return (
       <div>
         <h1 className="page-title">Command Center</h1>
@@ -75,7 +69,7 @@ export function CommandCenter() {
         <h1 className="page-title">Command Center</h1>
         <RefreshBadge
           dataUpdatedAt={dataUpdatedAt}
-          isFetching={healthFetching || metricsFetching}
+          isFetching={healthFetching}
           intervalSec={15}
         />
       </div>
