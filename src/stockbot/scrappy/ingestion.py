@@ -50,7 +50,9 @@ def fetch_feed(url: str, source_name: str, timeout_sec: int = 15) -> list[dict[s
     """Fetch one RSS/Atom feed; return list of candidate dicts."""
     candidates: list[dict[str, Any]] = []
     try:
-        parsed = feedparser.parse(url, request_headers={"User-Agent": "StockBot-Scrappy/1.0"}, timeout=timeout_sec)
+        # feedparser.parse() doesn't support timeout parameter - timeout is handled by underlying urllib
+        # We can set it via request_headers or use a custom opener, but for now just remove timeout
+        parsed = feedparser.parse(url, request_headers={"User-Agent": "StockBot-Scrappy/1.0"})
     except Exception as e:
         logger.warning("feed fetch failed url=%s error=%s", url[:80], e)
         return candidates
