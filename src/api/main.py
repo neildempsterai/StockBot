@@ -451,10 +451,11 @@ async def get_signals_rejection_summary() -> dict:
         # Get current session and entry window status
         from stockbot.market_sessions import current_session
         from stockbot.config import get_settings
+        from stockbot.strategies.intra_event_momo import ENTRY_START_ET, ENTRY_END_ET
         settings = get_settings()
         session_label = current_session()
-        entry_start = getattr(settings, "entry_start_et", "09:35")
-        entry_end = getattr(settings, "entry_end_et", "11:30")
+        entry_start = getattr(settings, "entry_start_et", None) or ENTRY_START_ET
+        entry_end = getattr(settings, "entry_end_et", None) or ENTRY_END_ET
         
         # Check if currently in entry window
         now_utc = datetime.now(UTC)
