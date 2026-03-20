@@ -44,6 +44,7 @@ from stockbot.db.models import (
     OpportunityCandidateRow,
     OpportunityRun,
     PaperAccountSnapshot,
+    PaperLifecycle,
     PaperOrder,
     PaperPortfolioHistoryPoint,
     ReconciliationLog,
@@ -864,17 +865,32 @@ async def paper_exposure() -> dict:
             sizing_at_entry = None
             scrappy_detail = None
             ai_referee_detail = None
+            lifecycle = None
+            # Try to find lifecycle by entry_order_id first, then by signal_uuid
             if rows:
                 row = rows[0]
                 order_origin = row.order_origin
                 order_intent = row.order_intent
                 order_source = _order_origin_to_source(row.order_origin)
                 signal_uuid = str(row.signal_uuid) if row.signal_uuid else None
-                if row.signal_uuid:
+                # Look up lifecycle by entry_order_id
+                if row.order_id:
+                    lifecycle_result = await session.execute(
+                        select(PaperLifecycle).where(PaperLifecycle.entry_order_id == row.order_id).limit(1)
+                    )
+                    lifecycle = lifecycle_result.scalars().first()
+                # If not found, try by signal_uuid
+                if not lifecycle and row.signal_uuid:
+                    lifecycle_result = await session.execute(
+                        select(PaperLifecycle).where(PaperLifecycle.signal_uuid == row.signal_uuid).limit(1)
+                    )
+                    lifecycle = lifecycle_result.scalars().first()
+                # Fallback to signal lookup if no lifecycle
+                if row.signal_uuid and not lifecycle:
                     sig_result = await session.execute(
                         select(Signal).where(Signal.signal_uuid == row.signal_uuid).limit(1)
                     )
-                    sig = sig_result.scalar().first()
+                    sig = sig_result.scalars().first()
                     if sig:
                         strategy_id = getattr(sig, "strategy_id", None)
                         strategy_version = getattr(sig, "strategy_version", None)
@@ -907,6 +923,73 @@ async def paper_exposure() -> dict:
                                     "evidence_sufficiency": getattr(ref, "evidence_sufficiency", None),
                                     "plain_english_rationale": (getattr(ref, "plain_english_rationale", None) or "")[:500],
                                 }
+            # Use lifecycle data if available
+            if lifecycle:
+                signal_uuid = str(lifecycle.signal_uuid)
+                strategy_id = lifecycle.strategy_id
+                strategy_version = lifecycle.strategy_version
+                order_source = "strategy_paper"
+                order_origin = "strategy"
+                # Get intelligence details from lifecycle
+                if lifecycle.intelligence_snapshot_id:
+                    snap = await session.get(SymbolIntelligenceSnapshot, lifecycle.intelligence_snapshot_id)
+                    if snap:
+                        headline_count = len(snap.headline_set_json) if isinstance(getattr(snap, "headline_set_json", None), list) else 0
+                        scrappy_detail = {
+                            "snapshot_id": snap.id,
+                            "freshness_minutes": getattr(snap, "freshness_minutes", None),
+                            "catalyst_direction": getattr(snap, "catalyst_direction", None),
+                            "evidence_count": getattr(snap, "evidence_count", None),
+                            "headline_count": headline_count,
+                            "stale_flag": getattr(snap, "stale_flag", None),
+                            "conflict_flag": getattr(snap, "conflict_flag", None),
+                        }
+                if lifecycle.ai_referee_assessment_id:
+                    ref = await session.get(AiRefereeAssessment, lifecycle.ai_referee_assessment_id)
+                    if ref:
+                        ai_referee_detail = {
+                            "ran": True,
+                            "model_name": getattr(ref, "model_name", None),
+                            "referee_version": getattr(ref, "referee_version", None),
+                            "decision_class": getattr(ref, "decision_class", None),
+                            "setup_quality_score": getattr(ref, "setup_quality_score", None),
+                            "contradiction_flag": getattr(ref, "contradiction_flag", None),
+                            "stale_flag": getattr(ref, "stale_flag", None),
+                            "evidence_sufficiency": getattr(ref, "evidence_sufficiency", None),
+                            "plain_english_rationale": (getattr(ref, "plain_english_rationale", None) or "")[:500],
+                        }
+                # Sizing details from lifecycle
+                sizing_at_entry = {
+                    "equity": float(lifecycle.sizing_equity) if lifecycle.sizing_equity else None,
+                    "buying_power": float(lifecycle.sizing_buying_power) if lifecycle.sizing_buying_power else None,
+                    "stop_distance": float(lifecycle.sizing_stop_distance) if lifecycle.sizing_stop_distance else None,
+                    "risk_per_trade_pct": float(lifecycle.sizing_risk_per_trade_pct) if lifecycle.sizing_risk_per_trade_pct else None,
+                    "max_position_pct": float(lifecycle.sizing_max_position_pct) if lifecycle.sizing_max_position_pct else None,
+                    "max_gross_exposure_pct": float(lifecycle.sizing_max_gross_exposure_pct) if lifecycle.sizing_max_gross_exposure_pct else None,
+                    "max_symbol_exposure_pct": float(lifecycle.sizing_max_symbol_exposure_pct) if lifecycle.sizing_max_symbol_exposure_pct else None,
+                    "max_concurrent_positions": lifecycle.sizing_max_concurrent_positions,
+                    "qty_proposed": float(lifecycle.sizing_qty_proposed) if lifecycle.sizing_qty_proposed else None,
+                    "qty_approved": float(lifecycle.sizing_qty_approved),
+                    "notional_approved": float(lifecycle.sizing_notional_approved) if lifecycle.sizing_notional_approved else None,
+                    "rejection_reason": lifecycle.sizing_rejection_reason,
+                }
+            # Determine managed/orphaned status
+            managed_status = "unmanaged"
+            if lifecycle:
+                if lifecycle.lifecycle_status in ("exited", "exit_submitted"):
+                    managed_status = "exited"
+                elif lifecycle.lifecycle_status in ("entry_filled", "exit_pending") and lifecycle.exit_order_id:
+                    managed_status = "managed"
+                elif lifecycle.lifecycle_status in ("entry_filled", "exit_pending"):
+                    managed_status = "managed"  # Has exit plan, waiting for exit
+                elif lifecycle.lifecycle_status == "entry_submitted":
+                    managed_status = "pending"
+                elif lifecycle.lifecycle_status == "orphaned":
+                    managed_status = "orphaned"
+                elif lifecycle.lifecycle_status == "blocked":
+                    managed_status = "blocked"
+            elif order_source == "legacy_unknown":
+                managed_status = "orphaned"
             exposure.append({
                 "symbol": symbol,
                 "side": side,
@@ -918,15 +1001,28 @@ async def paper_exposure() -> dict:
                 "strategy_id": strategy_id,
                 "strategy_version": strategy_version,
                 "signal_uuid": signal_uuid,
+                "entry_order_id": lifecycle.entry_order_id if lifecycle else None,
+                "exit_order_id": lifecycle.exit_order_id if lifecycle else None,
                 "scrappy_at_entry": scrappy_at_entry,
                 "scrappy_detail": scrappy_detail,
                 "ai_referee_at_entry": ai_referee_at_entry,
                 "ai_referee_detail": ai_referee_detail,
                 "sizing_at_entry": sizing_at_entry,
-                "exit_plan_status": "not_persisted",
-                "broker_protection": "unknown",
-                "orphaned": order_source == "legacy_unknown",
-                "static_fallback_at_entry": "unknown",
+                "exit_plan_status": lifecycle.lifecycle_status if lifecycle else "not_persisted",
+                "stop_price": float(lifecycle.stop_price) if lifecycle else None,
+                "target_price": float(lifecycle.target_price) if lifecycle else None,
+                "force_flat_time": lifecycle.force_flat_time if lifecycle else None,
+                "protection_mode": lifecycle.protection_mode if lifecycle else None,
+                "protection_active": lifecycle.exit_order_id is not None if lifecycle else False,
+                "broker_protection": lifecycle.protection_mode if lifecycle else "unknown",
+                "managed_status": managed_status,
+                "orphaned": managed_status == "orphaned",
+                "universe_source": lifecycle.universe_source if lifecycle else None,
+                "static_fallback_at_entry": lifecycle.universe_source == "static" if lifecycle else None,
+                "lifecycle_status": lifecycle.lifecycle_status if lifecycle else None,
+                "exit_reason": lifecycle.exit_reason if lifecycle else None,
+                "exit_ts": lifecycle.exit_ts.isoformat() if lifecycle and lifecycle.exit_ts else None,
+                "last_error": lifecycle.last_error if lifecycle else None,
             })
     return {"positions": exposure, "count": len(exposure)}
 

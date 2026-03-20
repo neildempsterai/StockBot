@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stockbot.db.models import Fill, OpportunityCandidateRow, Signal, ShadowTrade
+from stockbot.db.models import Fill, OpportunityCandidateRow, PaperLifecycle, Signal, ShadowTrade
 from stockbot.ledger.events import FillEvent, SignalEvent
 
 
@@ -172,4 +172,164 @@ class LedgerStore:
         result = await self._session.execute(
             select(Fill).order_by(Fill.created_at.desc()).limit(limit)
         )
+        return list(result.scalars().all())
+
+    async def insert_paper_lifecycle(
+        self,
+        signal_uuid: UUID,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        strategy_id: str,
+        strategy_version: str,
+        entry_ts: datetime,
+        entry_price: Decimal,
+        stop_price: Decimal,
+        target_price: Decimal,
+        force_flat_time: str | None,
+        protection_mode: str,
+        intelligence_snapshot_id: int | None,
+        ai_referee_assessment_id: int | None,
+        sizing_equity: Decimal | None,
+        sizing_buying_power: Decimal | None,
+        sizing_stop_distance: Decimal | None,
+        sizing_risk_per_trade_pct: Decimal | None,
+        sizing_max_position_pct: Decimal | None,
+        sizing_max_gross_exposure_pct: Decimal | None,
+        sizing_max_symbol_exposure_pct: Decimal | None,
+        sizing_max_concurrent_positions: int | None,
+        sizing_qty_proposed: Decimal | None,
+        sizing_qty_approved: Decimal,
+        sizing_notional_approved: Decimal | None,
+        sizing_rejection_reason: str | None,
+        universe_source: str,
+        paper_armed: bool,
+        paper_armed_reason: str | None,
+        lifecycle_status: str = "planned",
+    ) -> PaperLifecycle:
+        """Create lifecycle record at entry planning time."""
+        row = PaperLifecycle(
+            signal_uuid=signal_uuid,
+            entry_order_id=None,
+            exit_order_id=None,
+            client_order_id=str(signal_uuid),
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            entry_ts=entry_ts,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            force_flat_time=force_flat_time,
+            protection_mode=protection_mode,
+            intelligence_snapshot_id=intelligence_snapshot_id,
+            ai_referee_assessment_id=ai_referee_assessment_id,
+            sizing_equity=sizing_equity,
+            sizing_buying_power=sizing_buying_power,
+            sizing_stop_distance=sizing_stop_distance,
+            sizing_risk_per_trade_pct=sizing_risk_per_trade_pct,
+            sizing_max_position_pct=sizing_max_position_pct,
+            sizing_max_gross_exposure_pct=sizing_max_gross_exposure_pct,
+            sizing_max_symbol_exposure_pct=sizing_max_symbol_exposure_pct,
+            sizing_max_concurrent_positions=sizing_max_concurrent_positions,
+            sizing_qty_proposed=sizing_qty_proposed,
+            sizing_qty_approved=sizing_qty_approved,
+            sizing_notional_approved=sizing_notional_approved,
+            sizing_rejection_reason=sizing_rejection_reason,
+            universe_source=universe_source,
+            paper_armed=paper_armed,
+            paper_armed_reason=paper_armed_reason,
+            lifecycle_status=lifecycle_status,
+        )
+        self._session.add(row)
+        await self._session.commit()
+        return row
+
+    async def update_paper_lifecycle_entry_order(
+        self, signal_uuid: UUID, entry_order_id: str, lifecycle_status: str = "entry_submitted"
+    ) -> None:
+        """Update lifecycle when entry order is submitted."""
+        from sqlalchemy import update
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(entry_order_id=entry_order_id, lifecycle_status=lifecycle_status)
+        )
+        await self._session.commit()
+
+    async def update_paper_lifecycle_entry_filled(
+        self, signal_uuid: UUID, lifecycle_status: str = "entry_filled"
+    ) -> None:
+        """Update lifecycle when entry order is filled."""
+        from sqlalchemy import update
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(lifecycle_status=lifecycle_status)
+        )
+        await self._session.commit()
+
+    async def update_paper_lifecycle_exit_order(
+        self, signal_uuid: UUID, exit_order_id: str, exit_reason: str, lifecycle_status: str = "exit_submitted"
+    ) -> None:
+        """Update lifecycle when exit order is submitted."""
+        from sqlalchemy import update
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(exit_order_id=exit_order_id, exit_reason=exit_reason, lifecycle_status=lifecycle_status)
+        )
+        await self._session.commit()
+
+    async def update_paper_lifecycle_exited(
+        self, signal_uuid: UUID, exit_ts: datetime, lifecycle_status: str = "exited"
+    ) -> None:
+        """Update lifecycle when exit is completed."""
+        from sqlalchemy import update
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(exit_ts=exit_ts, lifecycle_status=lifecycle_status)
+        )
+        await self._session.commit()
+
+    async def update_paper_lifecycle_error(
+        self, signal_uuid: UUID, error: str, lifecycle_status: str | None = None
+    ) -> None:
+        """Update lifecycle with error state."""
+        from sqlalchemy import update
+        values = {"last_error": error}
+        if lifecycle_status:
+            values["lifecycle_status"] = lifecycle_status
+        await self._session.execute(
+            update(PaperLifecycle)
+            .where(PaperLifecycle.signal_uuid == signal_uuid)
+            .values(**values)
+        )
+        await self._session.commit()
+
+    async def get_paper_lifecycle_by_signal_uuid(self, signal_uuid: UUID) -> PaperLifecycle | None:
+        """Get lifecycle record by signal UUID."""
+        result = await self._session.execute(
+            select(PaperLifecycle).where(PaperLifecycle.signal_uuid == signal_uuid).limit(1)
+        )
+        return result.scalars().first()
+
+    async def get_paper_lifecycle_by_entry_order_id(self, entry_order_id: str) -> PaperLifecycle | None:
+        """Get lifecycle record by entry order ID."""
+        result = await self._session.execute(
+            select(PaperLifecycle).where(PaperLifecycle.entry_order_id == entry_order_id).limit(1)
+        )
+        return result.scalars().first()
+
+    async def list_paper_lifecycles(
+        self, limit: int = 100, lifecycle_status: str | None = None
+    ) -> list[PaperLifecycle]:
+        """List lifecycle records."""
+        q = select(PaperLifecycle).order_by(PaperLifecycle.created_at.desc()).limit(limit)
+        if lifecycle_status:
+            q = q.where(PaperLifecycle.lifecycle_status == lifecycle_status)
+        result = await self._session.execute(q)
         return list(result.scalars().all())

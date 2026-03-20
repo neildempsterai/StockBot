@@ -271,6 +271,54 @@ class PaperOrderEvent(Base):
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
+class PaperLifecycle(Base):
+    """Complete lifecycle record for strategy paper trades: entry plan, sizing, exit plan, protection mode."""
+    __tablename__ = "paper_lifecycles"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    signal_uuid: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, index=True)
+    entry_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    exit_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    qty: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    stop_price: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    target_price: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    force_flat_time: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    protection_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="worker_mirrored")
+    intelligence_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("symbol_intelligence_snapshots.id"), nullable=True, index=True)
+    ai_referee_assessment_id: Mapped[int | None] = mapped_column(ForeignKey("ai_referee_assessments.id"), nullable=True, index=True)
+    # Sizing at entry
+    sizing_equity: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), nullable=True)
+    sizing_buying_power: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), nullable=True)
+    sizing_stop_distance: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    sizing_risk_per_trade_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    sizing_max_position_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    sizing_max_gross_exposure_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    sizing_max_symbol_exposure_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    sizing_max_concurrent_positions: Mapped[int | None] = mapped_column(nullable=True)
+    sizing_qty_proposed: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    sizing_qty_approved: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    sizing_notional_approved: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), nullable=True)
+    sizing_rejection_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Universe and arming state at entry
+    universe_source: Mapped[str] = mapped_column(String(16), nullable=False, default="dynamic")
+    paper_armed: Mapped[bool] = mapped_column(nullable=False, default=False)
+    paper_armed_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Lifecycle status
+    lifecycle_status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned", index=True)
+    exit_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class PaperPortfolioHistoryPoint(Base):
     __tablename__ = "paper_portfolio_history_points"
 

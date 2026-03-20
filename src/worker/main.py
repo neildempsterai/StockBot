@@ -102,6 +102,41 @@ def _paper_force_flat_close(symbol: str) -> None:
                 continue
             if qty_float == 0:
                 continue
+
+
+def _submit_paper_exit_order(
+    signal_uuid: str,
+    symbol: str,
+    side: str,
+    qty: Decimal,
+    exit_reason: str,
+) -> tuple[bool, str | None, str | None]:
+    """
+    Submit paper exit order (close long or cover short).
+    Returns (success, order_id_or_none, reason_code).
+    Reason codes: paper_exit_submitted | paper_exit_rejected | paper_exit_skipped_broker_unavailable
+    """
+    try:
+        from stockbot.alpaca.client import AlpacaClient
+        client = AlpacaClient()
+        # Determine exit side: long -> sell, short -> buy
+        exit_side = "sell" if side.lower() == "buy" else "buy"
+        # Use signal_uuid as client_order_id for idempotency
+        client_order_id = f"{signal_uuid}_exit_{exit_reason}"
+        order = client.create_order(
+            symbol=symbol,
+            qty=float(qty),
+            side=exit_side,
+            client_order_id=client_order_id,
+            time_in_force="day",
+            order_type="market",
+        )
+        return (True, order.get("id"), "paper_exit_submitted")
+    except Exception as e:
+        err = str(e).lower()
+        if "403" in err or "forbidden" in err or "not allowed" in err:
+            return (False, None, "paper_exit_rejected")
+        return (False, None, "paper_exit_skipped_broker_unavailable")
             side = "sell" if qty_float > 0 else "buy"
             close_qty = abs(qty_float)
             client.create_order(
@@ -550,9 +585,30 @@ async def _on_bar(
             except Exception:
                 paper_armed_redis = False
             paper_armed = paper_armed_config and paper_armed_redis
+            exit_order_id_force_flat: str | None = None
             if execution_mode == "paper" and paper_enabled and paper_armed:
                 allow, block_reason = await _paper_allowed_universe(redis_client)
                 if allow:
+                    # Submit paper exit order for force-flat
+                    ok, exit_order_id_force_flat, exit_reason_code = await asyncio.to_thread(
+                        _submit_paper_exit_order,
+                        str(pos.signal_uuid),
+                        symbol,
+                        pos.side,
+                        pos.qty,
+                        "force_flat",
+                    )
+                    if ok and exit_order_id_force_flat:
+                        logger.info(
+                            "paper_force_flat_submitted symbol=%s exit_order_id=%s signal_uuid=%s",
+                            symbol, exit_order_id_force_flat, str(pos.signal_uuid),
+                        )
+                    else:
+                        logger.warning(
+                            "paper_force_flat_failed symbol=%s reason=%s signal_uuid=%s",
+                            symbol, exit_reason_code, str(pos.signal_uuid),
+                        )
+                    # Also call legacy force-flat function for compatibility
                     await asyncio.to_thread(_paper_force_flat_close, symbol)
                 else:
                     logger.warning("paper_force_flat_skipped symbol=%s reason=%s", symbol, block_reason)
@@ -585,6 +641,12 @@ async def _on_bar(
                         fee_per_share=rec["fee_per_share"],
                         scrappy_mode=scrappy_mode,
                     )
+                # Update lifecycle for force-flat exit
+                if execution_mode == "paper" and paper_enabled and paper_armed and exit_order_id_force_flat:
+                    await store.update_paper_lifecycle_exit_order(
+                        pos.signal_uuid, exit_order_id_force_flat, "force_flat", "exit_submitted"
+                    )
+                    await store.update_paper_lifecycle_exited(pos.signal_uuid, exit_ts, "exited")
             shadow_state.close_position(symbol)
             logger.info(
                 "shadow_closed symbol=%s exit_reason=force_flat signal_uuid=%s",
@@ -634,6 +696,47 @@ async def _on_bar(
                     "shadow_closed symbol=%s exit_reason=%s signal_uuid=%s",
                     symbol, exit_reason, str(pos.signal_uuid),
                 )
+                # Mirror stop/target exit to paper if in paper mode
+                execution_mode_val = getattr(settings, "execution_mode", "shadow")
+                paper_enabled = getattr(settings, "paper_execution_enabled", False)
+                paper_armed_config = getattr(settings, "paper_trading_armed", False)
+                try:
+                    paper_armed_redis = (await redis_client.get(PAPER_ARMED_REDIS_KEY)) == "1"
+                except Exception:
+                    paper_armed_redis = False
+                paper_armed = paper_armed_config and paper_armed_redis
+                if execution_mode_val == "paper" and paper_enabled and paper_armed and exit_reason in ("stop", "target"):
+                    # Check if lifecycle exists and hasn't already submitted exit
+                    factory_exit = get_session_factory()
+                    async with factory_exit() as session_exit:
+                        store_exit = LedgerStore(session_exit)
+                        lifecycle = await store_exit.get_paper_lifecycle_by_signal_uuid(pos.signal_uuid)
+                        if lifecycle and lifecycle.exit_order_id is None:
+                            # Submit paper exit order
+                            ok, exit_order_id, exit_reason_code = await asyncio.to_thread(
+                                _submit_paper_exit_order,
+                                str(pos.signal_uuid),
+                                symbol,
+                                pos.side,
+                                pos.qty,
+                                exit_reason,
+                            )
+                            if ok and exit_order_id:
+                                await store_exit.update_paper_lifecycle_exit_order(
+                                    pos.signal_uuid, exit_order_id, exit_reason, "exit_submitted"
+                                )
+                                logger.info(
+                                    "paper_exit_submitted symbol=%s exit_reason=%s exit_order_id=%s signal_uuid=%s",
+                                    symbol, exit_reason, exit_order_id, str(pos.signal_uuid),
+                                )
+                            else:
+                                await store_exit.update_paper_lifecycle_error(
+                                    pos.signal_uuid, exit_reason_code or "paper_exit_failed", "exit_pending"
+                                )
+                                logger.warning(
+                                    "paper_exit_failed symbol=%s exit_reason=%s reason=%s signal_uuid=%s",
+                                    symbol, exit_reason, exit_reason_code, str(pos.signal_uuid),
+                                )
         return
 
     # One trade per symbol per day (scheduler clears TRADED_TODAY_KEY at 04:00 ET)
@@ -867,8 +970,10 @@ async def _on_bar(
                 eval_result.reason_codes = []
             eval_result.reason_codes.append(block_reason or "paper_blocked_static_fallback")
             paper_armed = False  # skip paper sizing and submission below
+    # Capture sizing details for lifecycle persistence (paper mode only)
+    sizing_details: dict[str, Any] | None = None
     if execution_mode_val == "paper" and paper_enabled and paper_armed:
-        def _get_account_positions_and_size() -> tuple[Decimal, str | None]:
+        def _get_account_positions_and_size() -> tuple[Decimal, str | None, dict[str, Any] | None]:
             from stockbot.alpaca.client import AlpacaClient
             try:
                 client = AlpacaClient()
@@ -877,8 +982,13 @@ async def _on_bar(
                 equity = Decimal(str(acc.get("equity") or 0))
                 buying_power = Decimal(str(acc.get("buying_power") or 0))
                 if equity <= 0:
-                    return (Decimal("100"), "paper_order_skipped_no_account_state")
+                    return (Decimal("100"), "paper_order_skipped_no_account_state", None)
                 stop_dist = abs(real_entry - stop_price)
+                risk_per_trade_pct = getattr(settings, "risk_per_trade_pct_equity", 0.5)
+                max_position_pct = getattr(settings, "max_position_pct_equity", 10.0)
+                max_concurrent = getattr(settings, "max_concurrent_positions", 5)
+                max_gross_pct = getattr(settings, "max_gross_exposure_pct_equity", 50.0)
+                max_symbol_pct = getattr(settings, "max_symbol_exposure_pct_equity", 20.0)
                 sizing = compute_sizing(
                     equity=equity,
                     buying_power=buying_power,
@@ -888,19 +998,33 @@ async def _on_bar(
                     stop_distance_per_share=stop_dist,
                     intended_entry_price=real_entry,
                     allow_shorts=getattr(settings, "paper_allow_shorts", False),
-                    risk_per_trade_pct_equity=getattr(settings, "risk_per_trade_pct_equity", 0.5),
-                    max_position_pct_equity=getattr(settings, "max_position_pct_equity", 10.0),
-                    max_concurrent_positions=getattr(settings, "max_concurrent_positions", 5),
-                    max_gross_exposure_pct_equity=getattr(settings, "max_gross_exposure_pct_equity", 50.0),
-                    max_symbol_exposure_pct_equity=getattr(settings, "max_symbol_exposure_pct_equity", 20.0),
+                    risk_per_trade_pct_equity=risk_per_trade_pct,
+                    max_position_pct_equity=max_position_pct,
+                    max_concurrent_positions=max_concurrent,
+                    max_gross_exposure_pct_equity=max_gross_pct,
+                    max_symbol_exposure_pct_equity=max_symbol_pct,
                 )
+                details = {
+                    "equity": equity,
+                    "buying_power": buying_power,
+                    "stop_distance": stop_dist,
+                    "risk_per_trade_pct": Decimal(str(risk_per_trade_pct)),
+                    "max_position_pct": Decimal(str(max_position_pct)),
+                    "max_gross_exposure_pct": Decimal(str(max_gross_pct)),
+                    "max_symbol_exposure_pct": Decimal(str(max_symbol_pct)),
+                    "max_concurrent_positions": max_concurrent,
+                    "qty_proposed": sizing.qty,
+                    "qty_approved": sizing.qty if sizing.approved else Decimal("0"),
+                    "notional_approved": sizing.notional if sizing.approved else None,
+                    "rejection_reason": sizing.rejection_reason,
+                }
                 if sizing.approved and sizing.qty > 0:
-                    return (sizing.qty, None)
-                return (Decimal("100"), sizing.rejection_reason or "paper_order_blocked_by_risk")
+                    return (sizing.qty, None, details)
+                return (Decimal("100"), sizing.rejection_reason or "paper_order_blocked_by_risk", details)
             except Exception as e:
                 logger.warning("paper_sizing_failed symbol=%s error=%s", symbol, e)
-                return (Decimal("100"), "paper_order_skipped_broker_unavailable")
-        sized_qty, paper_reject = await asyncio.to_thread(_get_account_positions_and_size)
+                return (Decimal("100"), "paper_order_skipped_broker_unavailable", None)
+        sized_qty, paper_reject, sizing_details = await asyncio.to_thread(_get_account_positions_and_size)
         qty = sized_qty
         if paper_reject:
             logger.info("paper_order_skipped symbol=%s reason=%s", symbol, paper_reject)
@@ -934,6 +1058,52 @@ async def _on_bar(
         )
         await store.insert_signal(event)
 
+    # Persist paper lifecycle at entry time (before order submission)
+    if execution_mode_val == "paper" and paper_enabled and paper_armed and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
+        try:
+            universe_source_val = await redis_client.get(REDIS_KEY_WORKER_UNIVERSE_SOURCE) or "dynamic"
+            paper_armed_reason_val = "armed" if paper_armed else "disarmed"
+            force_flat_time_val = getattr(settings, "force_flat_et", "15:45")
+            protection_mode_val = "worker_mirrored"  # Alpaca paper doesn't support bracket orders easily, use worker-mirrored
+            factory_lifecycle = get_session_factory()
+            async with factory_lifecycle() as session_lifecycle:
+                store_lifecycle = LedgerStore(session_lifecycle)
+                await store_lifecycle.insert_paper_lifecycle(
+                    signal_uuid=signal_uuid,
+                    symbol=symbol,
+                    side=side_str,
+                    qty=qty,
+                    strategy_id=STRATEGY_ID,
+                    strategy_version=STRATEGY_VERSION,
+                    entry_ts=last_bar.timestamp,
+                    entry_price=real_entry,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    force_flat_time=force_flat_time_val,
+                    protection_mode=protection_mode_val,
+                    intelligence_snapshot_id=snapshot_row.id if snapshot_row else None,
+                    ai_referee_assessment_id=ai_referee_assessment_id,
+                    sizing_equity=sizing_details.get("equity") if sizing_details else None,
+                    sizing_buying_power=sizing_details.get("buying_power") if sizing_details else None,
+                    sizing_stop_distance=sizing_details.get("stop_distance") if sizing_details else None,
+                    sizing_risk_per_trade_pct=sizing_details.get("risk_per_trade_pct") if sizing_details else None,
+                    sizing_max_position_pct=sizing_details.get("max_position_pct") if sizing_details else None,
+                    sizing_max_gross_exposure_pct=sizing_details.get("max_gross_exposure_pct") if sizing_details else None,
+                    sizing_max_symbol_exposure_pct=sizing_details.get("max_symbol_exposure_pct") if sizing_details else None,
+                    sizing_max_concurrent_positions=sizing_details.get("max_concurrent_positions") if sizing_details else None,
+                    sizing_qty_proposed=sizing_details.get("qty_proposed") if sizing_details else None,
+                    sizing_qty_approved=sizing_details.get("qty_approved") if sizing_details else qty,
+                    sizing_notional_approved=sizing_details.get("notional_approved") if sizing_details else None,
+                    sizing_rejection_reason=sizing_details.get("rejection_reason") if sizing_details else None,
+                    universe_source=universe_source_val,
+                    paper_armed=paper_armed,
+                    paper_armed_reason=paper_armed_reason_val,
+                    lifecycle_status="planned",
+                )
+            logger.info("paper_lifecycle_persisted symbol=%s signal_uuid=%s", symbol, str(signal_uuid))
+        except Exception as e:
+            logger.warning("paper_lifecycle_persist_failed symbol=%s error=%s", symbol, e)
+
     # Paper order submission after signal persisted (client_order_id = signal_uuid). Requires paper_trading_armed.
     if execution_mode_val == "paper" and paper_enabled and paper_armed and "paper_order_skipped" not in (eval_result.reason_codes or []) and "paper_order_blocked" not in (eval_result.reason_codes or []):
         ok, order_id, reason = await asyncio.to_thread(
@@ -944,12 +1114,21 @@ async def _on_bar(
             async with factory2() as session2:
                 store2 = LedgerStore(session2)
                 await store2.update_signal_paper_order(signal_uuid, order_id, "paper")
+                await store2.update_paper_lifecycle_entry_order(signal_uuid, order_id, "entry_submitted")
             logger.info("paper_order_submitted symbol=%s order_id=%s signal_uuid=%s", symbol, order_id, str(signal_uuid))
         else:
             logger.info("paper_order_failed symbol=%s reason=%s", symbol, reason)
             if eval_result.reason_codes is None:
                 eval_result.reason_codes = []
             eval_result.reason_codes.append(reason or "paper_order_rejected")
+            # Update lifecycle with error
+            try:
+                factory_err = get_session_factory()
+                async with factory_err() as session_err:
+                    store_err = LedgerStore(session_err)
+                    await store_err.update_paper_lifecycle_error(signal_uuid, reason or "paper_order_rejected", "blocked")
+            except Exception:
+                pass
 
     shadow_state.open_position(ShadowPosition(
         signal_uuid=signal_uuid,
